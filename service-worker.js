@@ -1,6 +1,6 @@
 // service-worker.js — cache offline do v1su4rt.
 // Ao alterar qualquer arquivo em APP_FILES, aumente CACHE_NAME.
-const CACHE_NAME = 'VISUAL_FUMACA_FOLHA_00-v26';
+const CACHE_NAME = 'VISUAL_FUMACA_FOLHA_00-v27';
 const APP_FILES = [
   './',
   './index.html',

@@ -24,6 +24,7 @@ A tela mostra só o visual e um painel pequeno: botão **Ativar interações**, 
 - **Desktop (≥ 1024 px):** painel de 400 px no canto; resolução interna adaptativa.
 - **Celular deitado:** painel estreito, sliders lado a lado.
 - Em telas compactas, a resolução interna começa mais alta para melhorar a nitidez e se ajusta conforme o desempenho.
+- O controle **Resolução no celular** ajusta a preferência entre economia e nitidez; a adaptação automática pode reduzir a resolução para manter a fluidez.
 - O shader usa menos camadas de ruído em celulares; a análise de pitch do microfone roda em intervalos, sem interromper a reação ao áudio.
 - `prefers-reduced-motion` deixa a animação mais lenta.
 

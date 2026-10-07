@@ -18,6 +18,8 @@
   const morphOut    = $('morph-value');
   const speedRange  = $('speed');
   const speedOut    = $('speed-value');
+  const resolutionRange = $('resolution');
+  const resolutionOut = $('resolution-value');
   const colorBtns   = document.querySelectorAll('[data-color-mode]');
   const chromaticEl = $('chromatic');
 
@@ -55,6 +57,23 @@
     const s = window.VISUAL_FUMAÇA_FOLHA_00;
     if (s && s.setOptions) s.setOptions({ speed: v });
   });
+
+  if (resolutionRange) {
+    const updateResolutionLabel = () => {
+      const value = parseFloat(resolutionRange.value);
+      if (resolutionOut) {
+        resolutionOut.textContent = value < 35 ? 'Econômica' : value > 80 ? 'Nítida' : 'Equilibrada';
+      }
+    };
+    resolutionRange.addEventListener('input', updateResolutionLabel);
+    resolutionRange.addEventListener('change', () => {
+      const s = window.VISUAL_FUMAÇA_FOLHA_00;
+      if (s && s.setOptions) s.setOptions({ resolution: parseFloat(resolutionRange.value) / 100 });
+    });
+    updateResolutionLabel();
+    const s = window.VISUAL_FUMAÇA_FOLHA_00;
+    if (s && s.setOptions) s.setOptions({ resolution: parseFloat(resolutionRange.value) / 100 });
+  }
 
   colorBtns.forEach((btn) => {
     btn.addEventListener('click', () => {

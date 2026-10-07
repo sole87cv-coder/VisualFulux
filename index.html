@@ -53,6 +53,13 @@
                     <input id="speed" type="range" min="0.05" max="3" step="0.05" value="1.0">
                 </div>
 
+                <div class="control resolution-control">
+                    <label for="resolution">Resolução no celular</label>
+                    <output id="resolution-value" for="resolution">Equilibrada</output>
+                    <input id="resolution" type="range" min="0" max="100" step="1" value="75">
+                    <div class="range-hints" aria-hidden="true"><span>Econômica</span><span>Mais nítida</span></div>
+                </div>
+
                 <div class="seg" role="group" aria-label="Modo de cor">
                     <button type="button" data-color-mode="auto" aria-pressed="true">Auto</button>
                     <button type="button" data-color-mode="bw" aria-pressed="false">P&amp;B</button>

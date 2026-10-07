@@ -42,13 +42,31 @@
   // Qualidade adaptativa: mantém os efeitos, reduz os pixels processados em celulares.
   const compactScreen = Math.min(window.innerWidth, window.innerHeight) < 760;
   const minRenderScale = ecoMode ? 0.18 : (compactScreen ? 0.22 : 0.40);
-  const maxRenderScale = ecoMode ? 0.68 : (compactScreen ? 0.82 : 0.80);
-  let renderScale = ecoMode ? 0.46 : (compactScreen ? 0.62 : 0.80);
+  const qualityMinStart = ecoMode ? 0.26 : (compactScreen ? 0.32 : 0.55);
+  const qualityMaxStart = ecoMode ? 0.54 : (compactScreen ? 0.72 : 0.80);
+  const qualityMinCeiling = ecoMode ? 0.38 : (compactScreen ? 0.52 : 0.55);
+  const qualityMaxCeiling = ecoMode ? 0.68 : (compactScreen ? 0.82 : 0.80);
+  let resolutionPreference = 0.75;
+  let maxRenderScale = qualityMinCeiling;
+  let renderScale = qualityMinStart;
   let perfWindowStart = 0;
   let perfDeltaSum = 0;
   let perfDeltaCount = 0;
   let renderAccumulator = 0;
   let lastRenderedAt = 0;
+
+  function applyResolutionPreference(value) {
+    resolutionPreference = Math.max(0, Math.min(1, value));
+    maxRenderScale = qualityMinCeiling
+      + (qualityMaxCeiling - qualityMinCeiling) * resolutionPreference;
+    const preferredStart = qualityMinStart
+      + (qualityMaxStart - qualityMinStart) * resolutionPreference;
+    renderScale = Math.min(maxRenderScale, Math.max(minRenderScale, preferredStart));
+    perfWindowStart = 0;
+    perfDeltaSum = 0;
+    perfDeltaCount = 0;
+  }
+  applyResolutionPreference(resolutionPreference);
 
   function adaptRenderScale(timestamp, dt) {
     if (dt >= 0.004 && dt <= 0.10) {
@@ -804,6 +822,9 @@ void main() {
     if (typeof opts.morph === 'number')      state.morph = boundedNumber(opts.morph, 0, 1, state.morph);
     if (typeof opts.speed === 'number')      state.speed = boundedNumber(opts.speed, 0.05, 3, state.speed);
     if (typeof opts.chromatic === 'boolean') state.chromatic = opts.chromatic;
+    if (typeof opts.resolution === 'number') {
+      applyResolutionPreference(boundedNumber(opts.resolution, 0, 1, resolutionPreference));
+    }
     if (typeof opts.colorMode === 'string') {
       if (opts.colorMode === 'auto' || opts.colorMode === 'bw' || opts.colorMode === 'color') {
         state.colorMode = opts.colorMode;

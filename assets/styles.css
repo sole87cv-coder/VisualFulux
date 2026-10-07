@@ -141,6 +141,14 @@ html, body {
 }
 .control output { font-variant-numeric: tabular-nums; color: var(--muted); }
 .control input { grid-column: 1 / -1; width: 100%; margin: 0; accent-color: var(--paper); min-height: 28px; }
+.range-hints {
+  grid-column: 1 / -1;
+  display: flex;
+  justify-content: space-between;
+  margin-top: -6px;
+  color: var(--muted);
+  font-size: 0.75rem;
+}
 
 .privacy {
   display: inline-block;
