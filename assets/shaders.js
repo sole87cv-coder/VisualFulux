@@ -41,9 +41,9 @@
 
   // Qualidade adaptativa: mantém os efeitos, reduz os pixels processados em celulares.
   const compactScreen = Math.min(window.innerWidth, window.innerHeight) < 760;
-  const minRenderScale = ecoMode ? 0.40 : 0.55;
-  const maxRenderScale = ecoMode ? 0.68 : (compactScreen ? 0.82 : 1.0);
-  let renderScale = ecoMode ? 0.62 : (compactScreen ? 0.82 : 1.0);
+  const minRenderScale = ecoMode ? 0.22 : (compactScreen ? 0.30 : 0.45);
+  const maxRenderScale = ecoMode ? 0.42 : (compactScreen ? 0.56 : 0.85);
+  let renderScale = ecoMode ? 0.38 : (compactScreen ? 0.50 : 0.85);
   let perfWindowStart = 0;
   let perfDeltaSum = 0;
   let perfDeltaCount = 0;
@@ -59,10 +59,12 @@
     if (timestamp - perfWindowStart < 2500) return;
 
     const avgFrameMs = perfDeltaCount ? (perfDeltaSum / perfDeltaCount) * 1000 : 0;
-    const targetFrameMs = ecoMode ? (1000 / 30) : (1000 / 60);
+    const targetFrameMs = compactScreen
+      ? (ecoMode && renderScale <= 0.27 ? (1000 / 24) : (1000 / 30))
+      : (1000 / 60);
     if (avgFrameMs > targetFrameMs + 8) {
       renderScale = Math.max(minRenderScale, renderScale * 0.86);
-    } else if (avgFrameMs > 0 && avgFrameMs < targetFrameMs + 2) {
+    } else if (avgFrameMs > 0 && avgFrameMs < targetFrameMs - 3) {
       renderScale = Math.min(maxRenderScale, renderScale + 0.025);
     }
     perfWindowStart = timestamp;
@@ -610,7 +612,7 @@ void main() {
     const w = window.innerWidth;
     const h = window.innerHeight;
     const device = w < 640 ? 'mobile' : w < 1024 ? 'tablet' : 'desktop';
-    const maxDpr = { mobile: 1.25, tablet: 1.5, desktop: 1.75 }[device];
+    const maxDpr = { mobile: 0.9, tablet: 1.25, desktop: 1.5 }[device];
     const dpr = Math.min(window.devicePixelRatio || 1, maxDpr) * renderScale;
     const cw = Math.max(2, Math.round(w * dpr));
     const ch = Math.max(2, Math.round(h * dpr));
@@ -734,11 +736,12 @@ void main() {
 
     updateGrowth(dt);
 
-    // Mantém a animação em 30 fps nos aparelhos econômicos, sem pausar o áudio.
-    if (ecoMode) {
+    // Limita o custo do desenho em celulares, mantendo o áudio atualizado.
+    if (compactScreen) {
+      const frameInterval = ecoMode && renderScale <= 0.27 ? (1.0 / 24.0) : (1.0 / 30.0);
       renderAccumulator += dt;
-      if (renderAccumulator < 1.0 / 30.0) return;
-      renderAccumulator %= 1.0 / 30.0;
+      if (renderAccumulator < frameInterval) return;
+      renderAccumulator %= frameInterval;
     }
     const renderedDelta = lastRenderedAt ? (t - lastRenderedAt) / 1000 : dt;
     lastRenderedAt = t;
@@ -794,6 +797,9 @@ void main() {
   lastTime = performance.now();
   frameId = requestAnimationFrame(frame);
 })();
+
+
+
 
 
 
