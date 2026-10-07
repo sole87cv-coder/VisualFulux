@@ -16,6 +16,7 @@
 
   let onset = 0, prevRms = 0, bassAvg = 0;
   let pitch01 = 0.5, pitchConfidence = 0;
+  let pitchFrame = 0;
   const onsetTimes = [];
   let bpm = 0, beatPhase = 0;
   let lastTilt = [0, 0];
@@ -50,28 +51,30 @@
   }
 
   function estimatePitch(timeData, sampleRate) {
-    const SIZE = timeData.length;
+    // Decima por 2: mantém a faixa útil de pitch com cerca de 1/4 do custo.
+    const SIZE = Math.floor(timeData.length / 2);
+    const effectiveRate = sampleRate * 0.5;
     let rms = 0;
     for (let i = 0; i < SIZE; i++) {
-      const v = (timeData[i] - 128) / 128;
+      const v = (timeData[i * 2] - 128) / 128;
       rms += v * v;
     }
     rms = Math.sqrt(rms / SIZE);
     if (rms < 0.01) return { pitch01: 0.5, conf: 0 };
     const minF = 80, maxF = 1200;
-    const minLag = Math.floor(sampleRate / maxF);
-    const maxLag = Math.floor(sampleRate / minF);
+    const minLag = Math.floor(effectiveRate / maxF);
+    const maxLag = Math.floor(effectiveRate / minF);
     let bestLag = -1, bestVal = 0;
     for (let lag = minLag; lag <= maxLag; lag++) {
       let s = 0;
       for (let i = 0; i < SIZE - lag; i++) {
-        s += ((timeData[i] - 128) / 128) * ((timeData[i + lag] - 128) / 128);
+        s += ((timeData[i * 2] - 128) / 128) * ((timeData[(i + lag) * 2] - 128) / 128);
       }
       s /= (SIZE - lag);
       if (s > bestVal) { bestVal = s; bestLag = lag; }
     }
     if (bestLag < 0 || bestVal < 0.15) return { pitch01: 0.5, conf: 0 };
-    const freq = sampleRate / bestLag;
+    const freq = effectiveRate / bestLag;
     const lo = Math.log2(80), hi = Math.log2(1200);
     const p = (Math.log2(Math.max(80, Math.min(1200, freq))) - lo) / (hi - lo);
     return { pitch01: Math.max(0, Math.min(1, p)), conf: Math.min(1, bestVal * 2.5) };
@@ -98,19 +101,24 @@
     bassAvg += (b - bassAvg) * 0.08;
     if (b - bassAvg > 0.16) onset = Math.max(onset, 1.0);
 
-    const p = estimatePitch(timeArray, audioCtx.sampleRate);
-    pitch01 = pitch01 * 0.85 + p.pitch01 * 0.15;
-    pitchConfidence = pitchConfidence * 0.9 + p.conf * 0.1;
+    // Pitch não precisa ser recalculado em cada quadro de áudio.
+    if ((pitchFrame++ % 6) === 0) {
+      const p = estimatePitch(timeArray, audioCtx.sampleRate);
+      pitch01 = pitch01 * 0.85 + p.pitch01 * 0.15;
+      pitchConfidence = pitchConfidence * 0.9 + p.conf * 0.1;
+    }
 
     const now = performance.now() / 1000;
+    let newOnset = false;
     if (onset > 0.7) {
       const last = onsetTimes[onsetTimes.length - 1];
       if (!last || now - last > 0.25) {
         onsetTimes.push(now);
         if (onsetTimes.length > 5) onsetTimes.shift();
+        newOnset = true;
       }
     }
-    if (onsetTimes.length >= 3) {
+    if (newOnset && onsetTimes.length >= 3) {
       const intervals = [];
       for (let i = 1; i < onsetTimes.length; i++) intervals.push(onsetTimes[i] - onsetTimes[i - 1]);
       const mean = intervals.reduce((x, y) => x + y, 0) / intervals.length;
@@ -147,7 +155,7 @@
       stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       source = audioCtx.createMediaStreamSource(stream);
       analyser = audioCtx.createAnalyser();
-      analyser.fftSize = 2048;
+      analyser.fftSize = 1024;
       const bufferLength = analyser.frequencyBinCount;
       dataArray = new Uint8Array(bufferLength);
       timeArray = new Uint8Array(analyser.fftSize);

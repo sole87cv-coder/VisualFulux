@@ -32,6 +32,16 @@ html, body {
   touch-action: none;
 }
 
+/* Evita recompor um grande backdrop desfocado em cada quadro da animação móvel. */
+@media (max-width: 640px) and (pointer: coarse) {
+  .panel,
+  .restore-btn {
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+    background: rgba(10, 13, 19, 0.88);
+  }
+}
+
 .no-webgl body,
 .no-webgl {
   background: radial-gradient(120% 90% at 30% 20%, #23305a 0%, #0d1220 45%, var(--ink) 100%);

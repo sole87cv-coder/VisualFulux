@@ -41,9 +41,9 @@
 
   // Qualidade adaptativa: mantém os efeitos, reduz os pixels processados em celulares.
   const compactScreen = Math.min(window.innerWidth, window.innerHeight) < 760;
-  const minRenderScale = ecoMode ? 0.22 : (compactScreen ? 0.30 : 0.45);
-  const maxRenderScale = ecoMode ? 0.42 : (compactScreen ? 0.56 : 0.85);
-  let renderScale = ecoMode ? 0.38 : (compactScreen ? 0.50 : 0.85);
+  const minRenderScale = ecoMode ? 0.18 : (compactScreen ? 0.22 : 0.40);
+  const maxRenderScale = ecoMode ? 0.34 : (compactScreen ? 0.44 : 0.80);
+  let renderScale = ecoMode ? 0.28 : (compactScreen ? 0.36 : 0.80);
   let perfWindowStart = 0;
   let perfDeltaSum = 0;
   let perfDeltaCount = 0;
@@ -185,12 +185,12 @@ void main() {
   // ==================== FUMAÇA (INTOCADA) ====================
   float warp = 0.55 + u_bass * 1.35;
   vec2 q = vec2(
-    fbm(pSmoke * 1.3 + time * 0.15, 5),
-    fbm(pSmoke * 1.3 + vec2(5.2, 1.3) + time * 0.13, 5)
+    fbm(pSmoke * 1.3 + time * 0.15, ${oct}),
+    fbm(pSmoke * 1.3 + vec2(5.2, 1.3) + time * 0.13, ${oct})
   );
   vec2 r = vec2(
-    fbm(pSmoke * 1.5 + warp * q + time * 0.20, 5),
-    fbm(pSmoke * 1.5 + warp * q + vec2(8.3, 2.8) + time * 0.18, 5)
+    fbm(pSmoke * 1.5 + warp * q + time * 0.20, ${oct}),
+    fbm(pSmoke * 1.5 + warp * q + vec2(8.3, 2.8) + time * 0.18, ${oct})
   );
   float smokeField = fbm(pSmoke * 1.8 + 2.0 * r, ${oct});
   smokeField = smoothstep(0.22, 0.78, smokeField);
@@ -512,6 +512,7 @@ void main() {
   let frameId = 0;
   let timeSec = 0;
   let lastOnsetTime = -10;
+  let fallbackLastAt = 0;
 
   function compile(type, src, tag) {
     const s = gl.createShader(type);
@@ -571,7 +572,8 @@ void main() {
     if (!gl) { console.error('[VISUAL_FUMAÇA_FOLHA_00] sem WebGL'); return false; }
 
     const vs = compile(gl.VERTEX_SHADER, VERT_FULL, 'vs');
-    const fsScene = compile(gl.FRAGMENT_SHADER, fragScene(ecoMode ? 4 : 6), 'fsScene');
+    const shaderOctaves = compactScreen ? (ecoMode ? 3 : 4) : (ecoMode ? 4 : 6);
+    const fsScene = compile(gl.FRAGMENT_SHADER, fragScene(shaderOctaves), 'fsScene');
     const fsPost = compile(gl.FRAGMENT_SHADER, FRAG_POST, 'fsPost');
     if (!vs || !fsScene || !fsPost) return false;
 
@@ -701,14 +703,19 @@ void main() {
     if (!ctx2d) ctx2d = canvas.getContext('2d');
     if (!ctx2d) return;
     const w = window.innerWidth, h = window.innerHeight;
-    if (canvas.width !== w || canvas.height !== h) {
-      canvas.width = w; canvas.height = h;
+    const scale = compactScreen ? 0.5 : 0.75;
+    const cw = Math.max(2, Math.round(w * scale));
+    const ch = Math.max(2, Math.round(h * scale));
+    if (canvas.width !== cw || canvas.height !== ch) {
+      canvas.width = cw; canvas.height = ch;
+      canvas.style.width = w + 'px';
+      canvas.style.height = h + 'px';
     }
-    const grd = ctx2d.createRadialGradient(w/2, h/2, 10, w/2, h/2, Math.min(w,h)*0.7);
+    const grd = ctx2d.createRadialGradient(cw/2, ch/2, 5, cw/2, ch/2, Math.min(cw,ch)*0.7);
     grd.addColorStop(0, 'rgba(120,180,255,0.55)');
     grd.addColorStop(1, 'rgba(4,6,10,1)');
     ctx2d.fillStyle = grd;
-    ctx2d.fillRect(0, 0, w, h);
+    ctx2d.fillRect(0, 0, cw, ch);
   }
 
   function frame(t) {
@@ -728,7 +735,12 @@ void main() {
     lastTime = t;
     timeSec += dt;
 
-    if (rendererMode !== 'webgl') { drawFallback2D(); return; }
+    if (rendererMode !== 'webgl') {
+      if (compactScreen && t - fallbackLastAt < 1000 / 30) return;
+      fallbackLastAt = t;
+      drawFallback2D();
+      return;
+    }
 
     if (state.onset > 0.55 && timeSec - lastOnsetTime > 0.18) {
       lastOnsetTime = timeSec;

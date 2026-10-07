@@ -19,11 +19,12 @@ A tela mostra só o visual e um painel pequeno: botão **Ativar interações**, 
 
 ## Celular, tablet e desktop
 
-- **Celular (< 640 px):** painel na largura toda, embaixo. Resolução interna limitada a 1.5x.
-- **Tablet (640–1023 px):** painel em cartão de 380 px no canto. Até 1.75x.
-- **Desktop (≥ 1024 px):** painel de 400 px no canto. Até 2x.
+- **Celular (< 640 px):** painel na largura toda, embaixo; renderização interna reduzida e limitada a 30 fps para poupar a GPU.
+- **Tablet (640–1023 px):** painel em cartão de 380 px no canto; resolução interna adaptativa.
+- **Desktop (≥ 1024 px):** painel de 400 px no canto; resolução interna adaptativa.
 - **Celular deitado:** painel estreito, sliders lado a lado.
-- Se o aparelho não sustentar ~40 fps, a resolução interna diminui sozinha.
+- Em telas compactas, a resolução interna começa baixa e se ajusta conforme o desempenho.
+- O shader usa menos camadas de ruído em celulares; a análise de pitch do microfone roda em intervalos, sem interromper a reação ao áudio.
 - `prefers-reduced-motion` deixa a animação mais lenta.
 
 ## Executar no computador

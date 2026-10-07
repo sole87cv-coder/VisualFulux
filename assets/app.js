@@ -7,7 +7,6 @@
   const $ = (id) => document.getElementById(id);
   const panel       = $('panel');
   const toggle      = $('interaction-toggle');
-  const status      = $('interaction-status');
   const collapseBtn = $('panel-collapse');
   const focusBtn    = $('panel-focus');
   const restoreBtn  = $('panel-restore');
@@ -22,11 +21,6 @@
   const colorBtns   = document.querySelectorAll('[data-color-mode]');
   const chromaticEl = $('chromatic');
 
-  function setStatus(msg, kind) {
-    if (!status) return;
-    status.textContent = msg || '';
-    status.dataset.kind = kind || 'ok';
-  }
   function paintButton() {
     const api = window.VISUAL_FUMAÇA_FOLHA_00Interaction;
     const on = api && typeof api.isActive === 'function' ? api.isActive() : false;
@@ -117,15 +111,6 @@
     }
   });
 
-  if (toggle) {
-    toggle.addEventListener('click', () => {
-      const api = window.VISUAL_FUMAÇA_FOLHA_00Interaction;
-      if (api && typeof api.start === 'function') {
-        if (api.isActive()) api.stop(); else api.start();
-      }
-      setTimeout(paintButton, 200);
-    });
-  }
   paintButton();
 
   if ('serviceWorker' in navigator &&
