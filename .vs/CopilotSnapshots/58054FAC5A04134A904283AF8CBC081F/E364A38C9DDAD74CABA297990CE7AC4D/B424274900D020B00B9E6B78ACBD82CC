@@ -1,0 +1,265 @@
+﻿/* interaction.js — v1su4rt
+ * Microfone (volume, graves, médios, agudos), giroscópio e mouse/toque.
+ * Envia tudo para window.v1su4rtShaders.setAudio() a cada frame:
+ *   { audio, bass, mid, treble, tilt: [x, y], zoom }
+ * O suavizamento (lerp) e o u_light ficam em shaders.js.
+ */
+(function () {
+  'use strict';
+
+  function $(id) { return document.getElementById(id); }
+  function clamp(x, a, b) { return x < a ? a : (x > b ? b : x); }
+
+  var ui = {};
+  var st = {
+    active: false, busy: false,
+    stream: null, ctx: null, analyser: null, tbuf: null, fbuf: null, bins: null,
+    gyroSeen: false, zero: null, zeroAngle: 0, gx: 0, gy: 0,   // giroscópio (graus/30)
+    px: 0, py: 0                                                // mouse/toque (-1..1)
+  };
+  var out = { audio: 0, bass: 0, mid: 0, treble: 0 };
+  var raf = 0, gyroTimer = 0;
+
+  // ------------------------------------------------------------------
+  // Interface
+  // ------------------------------------------------------------------
+  function setStatus(msg) { if (ui.status) ui.status.textContent = msg || ''; }
+
+  function setButton() {
+    if (!ui.btn) return;
+    ui.btn.textContent = st.active ? 'Desativar interações' : 'Ativar interações';
+    ui.btn.setAttribute('aria-pressed', st.active ? 'true' : 'false');
+  }
+
+  function sens(el) { return el ? (parseFloat(el.value) || 0) : 1.5; }
+  function factor(el) { return sens(el) / 1.5; }   // 1.0 no valor padrão (1.50)
+
+  function syncOutputs() {
+    if (ui.audioOut && ui.audioSens) ui.audioOut.textContent = sens(ui.audioSens).toFixed(2);
+    if (ui.orientOut && ui.orientSens) ui.orientOut.textContent = sens(ui.orientSens).toFixed(2);
+  }
+
+  // ------------------------------------------------------------------
+  // Giroscópio
+  // ------------------------------------------------------------------
+  function screenAngle() {
+    var a = (window.screen && screen.orientation && typeof screen.orientation.angle === 'number')
+      ? screen.orientation.angle : (typeof window.orientation === 'number' ? window.orientation : 0);
+    return ((a % 360) + 360) % 360;
+  }
+
+  function onOrient(e) {
+    if (e.beta === null || e.gamma === null || e.beta === undefined || e.gamma === undefined) return;
+    st.gyroSeen = true;
+    var ang = screenAngle();
+    // a posição ao ativar (ou ao girar a tela) vira o zero
+    if (!st.zero || st.zeroAngle !== ang) { st.zero = { b: e.beta, g: e.gamma }; st.zeroAngle = ang; }
+    var db = e.beta - st.zero.b, dg = e.gamma - st.zero.g, x, y;
+    if (ang === 90) { x = db; y = -dg; }
+    else if (ang === 180) { x = -dg; y = -db; }
+    else if (ang === 270) { x = -db; y = dg; }
+    else { x = dg; y = db; }
+    st.gx = x / 30;
+    st.gy = y / 30;
+  }
+
+  // iOS pede permissão de movimento: precisa ser chamado dentro do toque
+  function requestMotion() {
+    if (typeof window.DeviceOrientationEvent === 'undefined') return Promise.resolve('unavailable');
+    if (typeof DeviceOrientationEvent.requestPermission === 'function') {
+      try {
+        return DeviceOrientationEvent.requestPermission()
+          .then(function (r) { return r === 'granted' ? 'granted' : 'denied'; })
+          .catch(function () { return 'denied'; });
+      } catch (e) { return Promise.resolve('denied'); }
+    }
+    return Promise.resolve('granted');
+  }
+
+  // ------------------------------------------------------------------
+  // Microfone
+  // ------------------------------------------------------------------
+  function requestMic() {
+    var AC = window.AudioContext || window.webkitAudioContext;
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia || !AC) {
+      return Promise.resolve({ ok: false, reason: window.isSecureContext === false ? 'insecure' : 'unsupported' });
+    }
+    var ctx;
+    try { ctx = new AC(); if (ctx.resume) ctx.resume(); } catch (e) { return Promise.resolve({ ok: false, reason: 'unsupported' }); }
+    return navigator.mediaDevices.getUserMedia({
+      audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false }
+    }).then(function (stream) {
+      var an = ctx.createAnalyser();
+      an.fftSize = 1024;
+      an.smoothingTimeConstant = 0.6;
+      an.minDecibels = -85;
+      an.maxDecibels = -25;
+      ctx.createMediaStreamSource(stream).connect(an);   // sem ligar ao destino: não gera eco
+      var hz = ctx.sampleRate / an.fftSize, n = an.frequencyBinCount;
+      function idx(f) { return clamp(Math.round(f / hz), 1, n); }
+      st.stream = stream; st.ctx = ctx; st.analyser = an;
+      st.tbuf = new Uint8Array(an.fftSize);
+      st.fbuf = new Uint8Array(n);
+      st.bins = { b0: idx(20), b1: idx(250), m1: idx(2000), t1: idx(8000) };
+      return { ok: true };
+    }).catch(function (err) {
+      try { ctx.close(); } catch (e) { /* ignora */ }
+      return { ok: false, reason: (err && err.name === 'NotAllowedError') ? 'denied' : 'error' };
+    });
+  }
+
+  function band(a, b, gain) {
+    var s = 0, n = Math.max(1, b - a), i;
+    for (i = a; i < b; i++) s += st.fbuf[i];
+    return clamp(((s / n) / 255 - 0.12) / 0.6 * gain, 0, 1);   // corta o piso de ruído
+  }
+
+  function analyse() {
+    var f = factor(ui.audioSens), i, s = 0, v;
+    st.analyser.getByteTimeDomainData(st.tbuf);
+    for (i = 0; i < st.tbuf.length; i++) { v = (st.tbuf[i] - 128) / 128; s += v * v; }
+    var rms = Math.sqrt(s / st.tbuf.length);
+    st.analyser.getByteFrequencyData(st.fbuf);
+    out.audio = clamp((rms - 0.006) * 5.5 * f, 0, 1);
+    out.bass = band(st.bins.b0, st.bins.b1, f);
+    out.mid = band(st.bins.b1, st.bins.m1, f * 1.25);
+    out.treble = band(st.bins.m1, st.bins.t1, f * 1.6);
+  }
+
+  // ------------------------------------------------------------------
+  // Ativar / desativar
+  // ------------------------------------------------------------------
+  function start() {
+    if (st.active || st.busy) return Promise.resolve();
+    st.busy = true;
+    if (ui.btn) ui.btn.disabled = true;
+    setStatus('Pedindo permissões…');
+    var motionP = requestMotion();   // chamados no mesmo toque (exigência do iOS)
+    var micP = requestMic();
+    return Promise.all([motionP, micP]).then(function (r) {
+      var motion = r[0], mic = r[1], msgs = [];
+      st.busy = false;
+      st.active = true;
+      st.gyroSeen = false; st.zero = null;
+      if (ui.btn) ui.btn.disabled = false;
+
+      if (motion === 'granted') {
+        window.addEventListener('deviceorientation', onOrient, true);
+        gyroTimer = setTimeout(function () {
+          if (st.active && !st.gyroSeen) setStatus(status(mic, 'nogyro'));
+        }, 1500);
+      }
+      setButton();
+      if (motion === 'denied') msgs.push('Movimento negado: recarregue a página e permita o acesso.');
+      setStatus(status(mic, motion === 'granted' ? 'ok' : (motion === 'denied' ? 'denied' : 'nogyro'), msgs));
+    });
+  }
+
+  function status(mic, gyro, extra) {
+    var m = [];
+    if (!mic.ok) {
+      if (mic.reason === 'denied') m.push('Microfone negado: libere nas configurações do site. A animação continua sozinha.');
+      else if (mic.reason === 'insecure') m.push('Microfone exige HTTPS. A animação continua sozinha.');
+      else m.push('Microfone indisponível neste aparelho. A animação continua sozinha.');
+    }
+    if (extra && extra.length) m = m.concat(extra);
+    if (gyro === 'nogyro') m.push('Giroscópio indisponível: use o mouse ou o toque.');
+    if (!m.length) m.push('Microfone e giroscópio ativos.');
+    return m.join(' ');
+  }
+
+  function stop() {
+    st.active = false; st.busy = false;
+    clearTimeout(gyroTimer);
+    window.removeEventListener('deviceorientation', onOrient, true);
+    if (st.stream) st.stream.getTracks().forEach(function (t) { t.stop(); });   // solta o microfone
+    if (st.ctx) { try { st.ctx.close(); } catch (e) { /* ignora */ } }
+    st.stream = null; st.ctx = null; st.analyser = null;
+    st.gyroSeen = false; st.zero = null; st.gx = 0; st.gy = 0;
+    out.audio = out.bass = out.mid = out.treble = 0;
+    if (ui.btn) ui.btn.disabled = false;
+    setButton();
+    setStatus('');
+    send();
+  }
+
+  function toggle() { return st.active ? (stop(), Promise.resolve()) : start(); }
+
+  // ------------------------------------------------------------------
+  // Envio para o shader (todo frame, enquanto a página está visível)
+  // ------------------------------------------------------------------
+  function send() {
+    var S = window.v1su4rtShaders;
+    if (!S || !S.setAudio) return;
+    var of = factor(ui.orientSens);
+    var tx = clamp(st.gx * of + st.px * of, -1, 1);
+    var ty = clamp(st.gy * of + st.py * of, -1, 1);
+    // zoom = áudio (60%) + módulo do tilt (40%); a respiração base fica no shaders.js
+    var mag = Math.min(1, Math.sqrt(tx * tx + ty * ty));
+    var zoom = clamp(0.9 + (0.6 * out.audio + 0.4 * mag) * 2.1, 0.5, 3.0);
+    S.setAudio({ audio: out.audio, bass: out.bass, mid: out.mid, treble: out.treble, tilt: [tx, ty], zoom: zoom });
+  }
+
+  function loop() {
+    raf = requestAnimationFrame(loop);
+    if (st.active && st.analyser) analyse();
+    send();
+  }
+
+  function onPointer(e) {
+    if (e.target && e.target.closest && e.target.closest('#panel')) return;   // não move ao usar os controles
+    st.px = (e.clientX / (window.innerWidth || 1)) * 2 - 1;
+    st.py = -((e.clientY / (window.innerHeight || 1)) * 2 - 1);
+  }
+  function onPointerEnd(e) {
+    if (e.pointerType && e.pointerType !== 'mouse') { st.px = 0; st.py = 0; }   // toque: volta ao centro
+  }
+
+  // ------------------------------------------------------------------
+  // Início
+  // ------------------------------------------------------------------
+  function init() {
+    ui.btn = $('interaction-toggle');
+    ui.status = $('interaction-status');
+    ui.audioSens = $('audio-sens');
+    ui.orientSens = $('orient-sens');
+    ui.audioOut = $('audio-sens-value');
+    ui.orientOut = $('orient-sens-value');
+
+    if (ui.btn) {
+      // fase de captura + stopImmediatePropagation: só este arquivo trata o botão
+      ui.btn.addEventListener('click', function (e) {
+        e.stopImmediatePropagation();
+        toggle();
+      }, true);
+    }
+    [ui.audioSens, ui.orientSens].forEach(function (el) {
+      if (el) el.addEventListener('input', syncOutputs);
+    });
+    syncOutputs();
+    setButton();
+
+    // arrastar o dedo precisa chegar como pointermove (sem o navegador assumir o gesto)
+    var stage = $('stage');
+    if (stage) stage.style.touchAction = 'none';
+    window.addEventListener('pointermove', onPointer, { passive: true });
+    window.addEventListener('pointerdown', onPointer, { passive: true });
+    window.addEventListener('pointerup', onPointerEnd, { passive: true });
+    window.addEventListener('pointercancel', onPointerEnd, { passive: true });
+
+    document.addEventListener('visibilitychange', function () {
+      if (document.hidden) { if (raf) { cancelAnimationFrame(raf); raf = 0; } }
+      else if (!raf) raf = requestAnimationFrame(loop);
+    });
+    raf = requestAnimationFrame(loop);
+  }
+
+  window.v1su4rtInteraction = {
+    start: start, stop: stop, toggle: toggle,
+    isActive: function () { return st.active; },
+    _state: st, _out: out
+  };
+
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
+  else init();
+})();

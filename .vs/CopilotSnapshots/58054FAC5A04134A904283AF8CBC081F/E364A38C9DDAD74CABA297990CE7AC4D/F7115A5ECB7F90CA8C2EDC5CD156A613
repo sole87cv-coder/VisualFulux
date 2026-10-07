@@ -1,0 +1,724 @@
+﻿/* shaders.js — v1su4rt
+ * Dodecaedro 3D (wireframe <-> sólido) guiado pelo microfone e fonte de luz (u_light)
+ * para o fundo. WebGL1/GLSL ES 1.0 em um passe, com fallback Canvas2D. Desenha em
+ * #stage e expõe window.v1su4rtShaders.setAudio(); interaction.js só envia números.
+ */
+(function () {
+  'use strict';
+
+  // --- Constantes (iguais no GLSL e no fallback) ---
+  var PHI = (1 + Math.sqrt(5)) / 2;
+  var CAM_D = 7.0;            // distância da câmera ao centro do dodecaedro
+  var FOCAL = 1.4;            // distância focal da projeção perspectiva
+  var TAU = Math.PI * 2;
+  var TIME_WRAP = 400 * Math.PI;   // múltiplo exato dos períodos usados no GLSL
+  var FLOW_WRAP = 10 * Math.PI;    // idem, para a fase do gradiente de fundo
+
+  var COL_A = [0x5b / 255, 0x8c / 255, 1.0];       // accent   #5b8cff
+  var COL_B = [0xa3 / 255, 0x7b / 255, 1.0];       // accent-2 #a37bff
+  var COL_M = [0.92, 0.27, 0.92];                  // magenta/violeta (graves)
+
+  function clamp(x, a, b) { return x < a ? a : (x > b ? b : x); }
+  function clamp01(x) { return clamp(x, 0, 1); }
+  function mix(a, b, t) { return a + (b - a) * t; }
+  function smooth(a, b, x) { var t = clamp01((x - a) / (b - a)); return t * t * (3 - 2 * t); }
+  function num(x, d) { x = +x; return isFinite(x) ? x : d; }
+
+  // --- Geometria do dodecaedro (usada pelo fallback e validada nos testes) ---
+  function buildGeometry() {
+    var inv = 1 / PHI, verts = [], edges = [], normals = [], faces = [];
+    var i, j, k, g, s;
+
+    // 20 vértices: (±1,±1,±1), (0,±1/φ,±φ), (±1/φ,±φ,0), (±φ,0,±1/φ)
+    for (i = -1; i <= 1; i += 2) for (j = -1; j <= 1; j += 2) for (k = -1; k <= 1; k += 2) verts.push([i, j, k]);
+    for (i = -1; i <= 1; i += 2) for (j = -1; j <= 1; j += 2) {
+      verts.push([0, i * inv, j * PHI]);
+      verts.push([i * inv, j * PHI, 0]);
+      verts.push([j * PHI, 0, i * inv]);
+    }
+
+    // 30 arestas: pares de vértices à distância 2/φ
+    function dist(a, b) { return Math.sqrt(Math.pow(a[0] - b[0], 2) + Math.pow(a[1] - b[1], 2) + Math.pow(a[2] - b[2], 2)); }
+    for (i = 0; i < verts.length; i++) {
+      for (j = i + 1; j < verts.length; j++) {
+        if (Math.abs(dist(verts[i], verts[j]) - 2 * inv) < 1e-3) edges.push([i, j]);
+      }
+    }
+
+    // 12 normais de face, na mesma ordem de faceN() no GLSL
+    var nn = 1 / Math.sqrt(1 + PHI * PHI);
+    for (g = 0; g < 3; g++) {
+      for (s = 0; s < 4; s++) {
+        var sa = s < 2 ? 1 : -1, sb = (s % 2 === 0) ? 1 : -1, v;
+        if (g === 0) v = [sa, 0, sb * PHI];
+        else if (g === 1) v = [sb * PHI, sa, 0];
+        else v = [0, sb * PHI, sa];
+        normals.push([v[0] * nn, v[1] * nn, v[2] * nn]);
+      }
+    }
+
+    // 12 faces pentagonais: os 5 vértices mais alinhados com a normal, em ordem
+    function dot(a, b) { return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]; }
+    function cross(a, b) { return [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]]; }
+    function norm(a) { var l = Math.sqrt(dot(a, a)); return [a[0] / l, a[1] / l, a[2] / l]; }
+    normals.forEach(function (n, fi) {
+      var best = -1e9, idx = [];
+      verts.forEach(function (v) { best = Math.max(best, dot(v, n)); });
+      verts.forEach(function (v, vi) { if (dot(v, n) > best - 1e-3) idx.push(vi); });
+      var t = Math.abs(n[0]) < 0.9 ? [1, 0, 0] : [0, 1, 0];
+      var u = norm(cross(n, t)), w = cross(n, u);
+      idx.sort(function (a, b) {
+        return Math.atan2(dot(verts[a], w), dot(verts[a], u)) - Math.atan2(dot(verts[b], w), dot(verts[b], u));
+      });
+      faces.push({ n: n, idx: idx, hash: Math.abs(Math.sin((fi + 1) * 12.9898) * 43758.5453) % 1 });
+    });
+
+    return { verts: verts, edges: edges, normals: normals, faces: faces };
+  }
+  var GEO = buildGeometry();
+
+  // Matriz 3x3 objeto←mundo = Rx(-ax)·Ry(-ay). Devolve linha-maior e coluna-maior.
+  function rotMatrix(ax, ay) {
+    var ca = Math.cos(ax), sa = Math.sin(ax), cb = Math.cos(ay), sb = Math.sin(ay);
+    var rx = [1, 0, 0, 0, ca, sa, 0, -sa, ca];       // Rx(-ax)
+    var ry = [cb, 0, -sb, 0, 1, 0, sb, 0, cb];       // Ry(-ay)
+    var m = new Array(9), r, c;
+    for (r = 0; r < 3; r++) for (c = 0; c < 3; c++) {
+      m[r * 3 + c] = rx[r * 3] * ry[c] + rx[r * 3 + 1] * ry[3 + c] + rx[r * 3 + 2] * ry[6 + c];
+    }
+    var col = [m[0], m[3], m[6], m[1], m[4], m[7], m[2], m[5], m[8]];
+    return { row: m, col: new Float32Array(col) };
+  }
+
+  // --- Shaders (GLSL ES 1.0) ---
+  var VERT = `attribute vec2 a_pos;
+void main() { gl_Position = vec4(a_pos, 0.0, 1.0); }`;
+
+  var FRAG = `#ifdef GL_FRAGMENT_PRECISION_HIGH
+precision highp float;
+#else
+precision mediump float;
+#endif
+
+uniform vec2  u_res;
+uniform float u_time;      // tempo (com wrap seguro)
+uniform float u_flow;      // fase do gradiente de fundo (acumulada no JS)
+uniform float u_audio;
+uniform float u_bass;
+uniform float u_mid;
+uniform float u_treble;
+uniform float u_solidity;  // 0 = transparente, 1 = sólido
+uniform float u_light;     // luz emitida = audio*0.7 + bass*0.3
+uniform float u_zoom;
+uniform vec2  u_tilt;      // giroscópio suavizado (-1..1)
+uniform float u_eco;       // 1 = modo econômico (só wireframe)
+uniform float u_ca;        // intensidade da aberração cromática
+uniform float u_scale;     // escala do sólido (0.8 .. 1.6)
+uniform mat3  u_rot;       // objeto <- mundo
+
+const float PHI = 1.6180339887;
+const float INR = 1.3763819205;       // raio inscrito (distância centro-face)
+const float NRM = 0.5257311121;       // 1/sqrt(1+PHI^2)
+const float INV_SIN = 1.1180339887;   // 1/sin(ângulo entre normais vizinhas)
+const float CAM_D = 7.0;
+const float FOCAL = 1.4;
+const vec3 COL_A = vec3(0.357, 0.549, 1.0);   // #5b8cff
+const vec3 COL_B = vec3(0.639, 0.482, 1.0);   // #a37bff
+const vec3 COL_M = vec3(0.92, 0.27, 0.92);
+const vec3 COL_EDGE = vec3(0.74, 0.85, 0.98);
+const vec3 BG = vec3(0.0392, 0.0471, 0.0627); // #0a0c10
+const vec3 LUMA = vec3(0.2126, 0.7152, 0.0722);
+
+// Normal da face i (0..11): (±1,0,±PHI) e permutações cíclicas
+vec3 faceN(float i) {
+  float g = floor(i / 4.0);
+  float s = i - g * 4.0;
+  float sa = (s < 2.0) ? 1.0 : -1.0;
+  float sb = (mod(s, 2.0) < 1.0) ? 1.0 : -1.0;
+  vec3 v = (g < 0.5) ? vec3(sa, 0.0, sb * PHI)
+         : ((g < 1.5) ? vec3(sb * PHI, sa, 0.0) : vec3(0.0, sb * PHI, sa));
+  return v * NRM;
+}
+
+float hash11(float n) { return fract(sin(n * 12.9898) * 43758.5453); }
+float hash21(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+
+// Ruído interno barato (senoides entrelaçadas), sem textura
+float pnoise(vec3 p, float t) {
+  return 0.5 + 0.5 * sin(dot(p, vec3(2.1, 1.7, 2.6)) + t * 0.6
+                         + 1.5 * sin(dot(p, vec3(1.3, -2.2, 1.9)) - t * 0.4));
+}
+
+// Distância (no plano da face f) até as duas arestas mais próximas.
+// As faces vizinhas têm n_i·n_j = 1/sqrt(5), então a distância até a aresta
+// compartilhada é (INR - n_j·p) / sin(ângulo). Dá as 30 arestas sem lista.
+vec2 edgeDist(vec3 p, float f) {
+  vec3 nf = faceN(f);
+  float m1 = 9.0;
+  float m2 = 9.0;
+  for (int j = 0; j < 12; j++) {
+    float fj = float(j);
+    vec3 nj = faceN(fj);
+    if (fj != f && dot(nj, nf) > 0.3) {
+      float e = (INR - dot(nj, p)) * INV_SIN;
+      if (e < m1) { m2 = m1; m1 = e; } else if (e < m2) { m2 = e; }
+    }
+  }
+  return vec2(m1, m2);
+}
+
+// Fundo: gradiente escuro + halo central iluminado por u_light
+vec3 background(vec2 uv) {
+  float L = u_light;
+  vec2 p = uv + u_tilt * 0.06;
+  float g = 0.5 + 0.5 * sin(p.x * 1.3 + u_flow) * cos(p.y * 1.1 - u_flow * 0.8 + p.x * 0.4);
+  g = g * 0.65 + 0.35 * smoothstep(-1.3, 1.3, p.y * 0.8 + p.x * 0.3);
+  vec3 gradCol = mix(BG, vec3(0.085, 0.07, 0.17), g * 0.7);
+  vec3 col = BG + (gradCol - BG) * (1.0 + 0.4 * L);
+
+
+  vec2 q = uv - u_tilt * 0.04;
+  float r = 0.22 + 0.85 * L;
+  float halo = exp(-dot(q, q) / (r * r * 0.45)) * 0.7 * pow(max(L, 0.0001), 1.15);
+  vec3 hcol = mix(vec3(0.36, 0.55, 1.0), vec3(0.88, 0.30, 0.80), clamp(u_bass * 0.75, 0.0, 1.0));
+  col += hcol * halo * 0.8;
+
+
+  vec2 sc = p * vec2(26.0, 15.0) + vec2(0.0, -u_flow * 1.5);
+  vec2 cell = floor(sc);
+  float h = hash21(cell);
+  float spot = 1.0 - smoothstep(0.0, 0.26, length(fract(sc) - 0.5));
+  float spark = step(0.965, h) * spot * (0.5 + 0.5 * sin(u_time * 14.0 + h * 60.0));
+  col += vec3(0.70, 0.85, 1.0) * spark * u_treble * (0.25 + g) * 0.6;
+  return col;
+}
+
+// Arestas + vértices; a aberração desloca os canais R e B em sentidos opostos
+vec3 edgeLayer(vec2 m, float aa, float ca) {
+  float lw = aa * 1.3;
+  vec3 d = vec3(m.x) + vec3(-ca, 0.0, ca) * aa * 2.2;
+  vec3 line = 1.0 - smoothstep(vec3(lw), vec3(lw + aa * 1.2), d);
+  vec3 glow = exp(-max(d, 0.0) / (aa * (5.0 + 12.0 * u_audio))) * (0.10 + 0.45 * u_audio);
+  vec3 ecol = mix(COL_EDGE, vec3(1.0), u_treble * 0.6);
+  vec3 outc = ecol * (line * 0.9 + glow) * (1.0 + 0.7 * u_treble);
+  float vd = length(m);
+  float vr = aa * (2.6 + 6.0 * u_treble);
+  float v = 1.0 - smoothstep(vr * 0.55, vr, vd);
+  float vg = exp(-vd / (vr * 1.6)) * 0.35 * (0.4 + u_treble);
+  outc += vec3(0.88, 0.94, 1.0) * (v + vg) * (0.8 + 0.8 * u_treble);
+  return outc;
+}
+
+// Cor da face: mix(accent, accent-2, ruído), graves puxam para magenta
+vec3 shadeFace(vec3 p, vec3 n, float f, vec3 rdv, vec3 L) {
+  float warp = smoothstep(0.7, 1.0, u_solidity);
+  vec3 q = p * 1.5 + warp * 0.35 * vec3(sin(p.y * 4.0 + u_time * 1.3), sin(p.z * 4.0 - u_time * 1.1), sin(p.x * 4.0 + u_time));
+  float nz = clamp(pnoise(q, u_time) + (hash11(f) - 0.5) * 0.3 + u_mid * 0.25, 0.0, 1.0);
+  vec3 c = mix(COL_A, COL_B, nz);
+  c = mix(c, COL_M, clamp(u_bass * 0.7, 0.0, 0.7));
+  float dif = 0.35 + 0.65 * max(dot(n, L), 0.0);
+  float fres = pow(1.0 - abs(dot(n, rdv)), 2.0);
+  c = c * dif * (0.55 + 0.75 * u_solidity + 0.4 * u_light)
+      + fres * mix(COL_A, COL_EDGE, 0.5) * 0.35 * (0.3 + u_solidity);
+  float l = dot(c, LUMA);
+  return mix(vec3(l), c, 1.0 + 0.5 * u_solidity);
+}
+
+void main() {
+  vec2 uv0 = (gl_FragCoord.xy * 2.0 - u_res) / u_res.y;
+  float pix = 2.0 / u_res.y;
+  vec3 col = background(uv0);
+
+
+  vec2 uv = uv0 / u_zoom;
+  vec3 ro = (u_rot * vec3(0.0, 0.0, -CAM_D)) / u_scale;
+  vec3 rd = u_rot * normalize(vec3(uv, FOCAL));
+
+
+  float tN = -1.0e4;
+  float tF = 1.0e4;
+  float fN = 0.0;
+  float fF = 0.0;
+  bool miss = false;
+  for (int i = 0; i < 12; i++) {
+    float fi = float(i);
+    vec3 n = faceN(fi);
+    float dn = dot(n, rd);
+    float num = INR - dot(n, ro);
+    if (abs(dn) < 1.0e-5) {
+      if (num < 0.0) miss = true;
+    } else {
+      float t = num / dn;
+      if (dn < 0.0) { if (t > tN) { tN = t; fN = fi; } }
+      else          { if (t < tF) { tF = t; fF = fi; } }
+    }
+  }
+
+  if (!miss && tN < tF && tF > 0.0) {
+    float aaK = pix / u_zoom / FOCAL;
+    float caAmt = u_ca * smoothstep(0.3, 1.4, length(uv0));
+    vec3 L = normalize(u_rot * vec3(-0.45, 0.6, -0.65));
+    vec3 pN = ro + rd * tN;
+    vec3 pF = ro + rd * tF;
+    vec3 nN = faceN(fN);
+    vec3 nF = faceN(fF);
+    float aaN = tN * aaK / max(abs(dot(nN, rd)), 0.25);
+    float aaF = tF * aaK / max(abs(dot(nF, rd)), 0.25);
+    vec2 mN = edgeDist(pN, fN);
+    vec2 mF = edgeDist(pF, fF);
+
+
+    float aFront = (1.0 - u_eco) * (0.02 + 0.88 * u_solidity);
+    float aBack = aFront * 0.55;
+
+    if (aBack > 0.001) col = mix(col, shadeFace(pF, nF, fF, rd, L) * 0.75, aBack);
+    col += edgeLayer(mF, aaF, caAmt) * 0.55;
+    if (aFront > 0.001) col = mix(col, shadeFace(pN, nN, fN, rd, L), aFront);
+    col += edgeLayer(mN, aaN, caAmt);
+  }
+
+
+  float zn = clamp((u_zoom - 0.5) / 2.5, 0.0, 1.0);
+  col *= 1.0 - (0.10 + 0.30 * zn) * smoothstep(0.35, 1.6, length(uv0));
+
+
+  float lum = dot(col, LUMA);
+  col *= min(1.0, 0.85 / max(lum, 0.0001));
+  gl_FragColor = vec4(col, 1.0);
+}`;
+
+  // WebGL1 só aceita ASCII no fonte: tira acentos (só existem em comentários)
+  function asciiOnly(s) {
+    if (s.normalize) s = s.normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+    return s.replace(/[^\x00-\x7F]/g, '');
+  }
+
+  // --- Estado (alvos vindos do interaction.js e valores suavizados) ---
+  var target = { audio: 0, bass: 0, mid: 0, treble: 0, tx: 0, ty: 0, zoom: NaN };
+  var lastSet = 0;
+  var cur = { audio: 0, bass: 0, mid: 0, treble: 0, solidity: 0, light: 0, tx: 0, ty: 0, zoom: 1.15 };
+  var anim = 0, flow = 0, rotA = 0.4, rotB = 0.6;
+
+  var reducedMotion = false;
+  try { reducedMotion = !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches); } catch (e) { /* sem matchMedia */ }
+  var timeScale = reducedMotion ? 0.4 : 1.0;
+
+  // Dispositivo fraco: poucos núcleos ou memória. ?eco=1 / ?eco=0 força o modo.
+  function detectEco() {
+    try {
+      var q = /[?&]eco=([01])/.exec(window.location.search);
+      if (q) return q[1] === '1';
+    } catch (e) { /* ignora */ }
+    var hc = navigator.hardwareConcurrency, dm = navigator.deviceMemory;
+    return !!((hc && hc <= 4) || (dm && dm <= 2));
+  }
+  var eco = detectEco();
+
+  function setAudio(s) {
+    if (!s) return;
+    target.audio = clamp01(num(s.audio, 0));
+    target.bass = clamp01(num(s.bass, 0));
+    target.mid = clamp01(num(s.mid, 0));
+    target.treble = clamp01(num(s.treble, 0));
+    var t = s.tilt;
+    if (t && t.length >= 2) { target.tx = clamp(num(t[0], 0), -1, 1); target.ty = clamp(num(t[1], 0), -1, 1); }
+    else if (t && typeof t === 'object') { target.tx = clamp(num(t.x, 0), -1, 1); target.ty = clamp(num(t.y, 0), -1, 1); }
+    else { target.tx = clamp(num(s.tiltX, 0), -1, 1); target.ty = clamp(num(s.tiltY, 0), -1, 1); }
+    target.zoom = (s.zoom === undefined || s.zoom === null) ? NaN : num(s.zoom, NaN);
+    lastSet = (window.performance && performance.now) ? performance.now() : Date.now();
+  }
+
+  // Avança o estado: suavizações independentes do framerate
+  function step(dt, now) {
+    var fresh = lastSet > 0 && (now - lastSet) < 1000;
+    var ta = fresh ? target.audio : 0, tb = fresh ? target.bass : 0;
+    var tm = fresh ? target.mid : 0, tt = fresh ? target.treble : 0;
+    var ttx = fresh ? target.tx : 0, tty = fresh ? target.ty : 0;
+
+    // áudio: ataque rápido, queda mais lenta (evita tremor)
+    var kUp = 1 - Math.exp(-dt / 0.04), kDn = 1 - Math.exp(-dt / 0.15);
+    cur.audio += (ta - cur.audio) * (ta > cur.audio ? kUp : kDn);
+    cur.bass += (tb - cur.bass) * (tb > cur.bass ? kUp : kDn);
+    cur.mid += (tm - cur.mid) * (tm > cur.mid ? kUp : kDn);
+    cur.treble += (tt - cur.treble) * (tt > cur.treble ? kUp : kDn);
+
+    // solidez: smoothstep(0.05, 0.6, audio) com lerp 0.08 por frame @60fps
+    var kSol = 1 - Math.pow(1 - 0.08, dt * 60);
+    cur.solidity += (smooth(0.05, 0.6, cur.audio) - cur.solidity) * kSol;
+
+    // luz: sobe rápido, some em ~0.6 s (constante de tempo 0.2 s)
+    var lt = ta * 0.7 + tb * 0.3;
+    cur.light += (lt - cur.light) * (1 - Math.exp(-dt / (lt > cur.light ? 0.05 : 0.2)));
+
+    // tilt: lerp 0.1 por frame @60fps
+    var kT = 1 - Math.pow(1 - 0.1, dt * 60);
+    cur.tx += (ttx - cur.tx) * kT;
+    cur.ty += (tty - cur.ty) * kT;
+
+    // tempo e rotação (fases acumuladas: não pulam quando a luz muda)
+    var dts = dt * timeScale;
+    anim = (anim + dts) % TIME_WRAP;
+    flow = (flow + dts * (0.06 + 0.35 * cur.light)) % FLOW_WRAP;
+    rotA += dts * (0.20 + 0.45 * cur.light);
+    rotB += dts * (0.29 + 0.55 * cur.light);
+
+    // zoom: respiração (seno de 8 s entre 0.9 e 1.4) ou áudio 60% + tilt 40%
+    var breath = 1.15 + 0.25 * Math.sin(TAU * anim / 8);
+    var zin = 0;
+    if (fresh) {
+      zin = isFinite(target.zoom) ? target.zoom
+          : 0.9 + 2.1 * (0.6 * ta + 0.4 * Math.min(1, Math.sqrt(ttx * ttx + tty * tty)));
+    }
+    cur.zoom += (Math.max(breath, zin) - cur.zoom) * (1 - Math.exp(-dt / 0.25));
+    cur.zoom = clamp(cur.zoom, 0.5, 3.0);
+
+    var ax = rotA + cur.ty * 0.8, ay = rotB - cur.tx * 0.9;
+    var rm = rotMatrix(ax, ay);
+    return {
+      time: anim, flow: flow,
+      audio: cur.audio, bass: cur.bass, mid: cur.mid, treble: cur.treble,
+      solidity: cur.solidity, light: cur.light, tx: cur.tx, ty: cur.ty,
+      zoom: cur.zoom, scale: 0.8 + 0.8 * cur.audio,
+      eco: eco ? 1 : 0, ca: eco ? 0 : smooth(2.0, 2.8, cur.zoom),
+      mRow: rm.row, mCol: rm.col
+    };
+  }
+
+  // --- Canvas / qualidade adaptativa ---
+  var canvas = null, renderer = null, quality = 1.0, fitFn = null;
+
+  function dprCap() {
+    var w = window.innerWidth || 1024;
+    var cap = w < 640 ? 1.5 : (w < 1024 ? 1.75 : 2.0);
+    return eco ? Math.min(cap, 1.25) : cap;
+  }
+
+  function fitCanvas() {
+    if (!canvas) return;
+    var r = canvas.getBoundingClientRect();
+    var w = r.width || window.innerWidth || 300, h = r.height || window.innerHeight || 150;
+    var s = Math.min(window.devicePixelRatio || 1, dprCap()) * quality;
+    var pw = Math.max(2, Math.round(w * s)), ph = Math.max(2, Math.round(h * s));
+    if (canvas.width !== pw || canvas.height !== ph) {
+      canvas.width = pw;
+      canvas.height = ph;
+      if (renderer && renderer.resize) renderer.resize(pw, ph);
+    }
+  }
+  fitFn = fitCanvas;
+
+  // Um canvas que já recebeu WebGL não aceita 2D: troca por um clone limpo
+  function replaceCanvas(cv) {
+    var fresh = cv.cloneNode(false);
+    if (cv.parentNode) cv.parentNode.replaceChild(fresh, cv);
+    return fresh;
+  }
+
+  // --- Renderer WebGL ---
+  function compile(gl, type, src) {
+    var sh = gl.createShader(type);
+    gl.shaderSource(sh, asciiOnly(src));
+    gl.compileShader(sh);
+    if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)) {
+      if (window.console) console.warn('[v1su4rt] shader:', gl.getShaderInfoLog(sh));
+      gl.deleteShader(sh);
+      return null;
+    }
+    return sh;
+  }
+
+  function createGL(cv) {
+    var gl = null;
+    try {
+      var opts = { antialias: false, alpha: false, depth: false, stencil: false };
+      gl = cv.getContext('webgl', opts) || cv.getContext('experimental-webgl', opts);
+    } catch (e) { gl = null; }
+    if (!gl) return null;
+
+    var vs = compile(gl, gl.VERTEX_SHADER, VERT), fs = compile(gl, gl.FRAGMENT_SHADER, FRAG);
+    if (!vs || !fs) return null;
+    var prog = gl.createProgram();
+    gl.attachShader(prog, vs);
+    gl.attachShader(prog, fs);
+    gl.linkProgram(prog);
+    if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
+      if (window.console) console.warn('[v1su4rt] link:', gl.getProgramInfoLog(prog));
+      return null;
+    }
+    gl.useProgram(prog);
+
+    // triângulo que cobre a tela inteira
+    var buf = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW);
+    var loc = gl.getAttribLocation(prog, 'a_pos');
+    gl.enableVertexAttribArray(loc);
+    gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
+
+    var names = ['u_res', 'u_time', 'u_flow', 'u_audio', 'u_bass', 'u_mid', 'u_treble', 'u_solidity',
+                 'u_light', 'u_zoom', 'u_tilt', 'u_eco', 'u_ca', 'u_scale', 'u_rot'];
+    var U = {};
+    names.forEach(function (n) { U[n] = gl.getUniformLocation(prog, n); });
+
+    cv.addEventListener('webglcontextlost', function (e) {
+      e.preventDefault();
+      switchTo2D();
+    }, false);
+
+    return {
+      kind: 'webgl',
+      resize: function (w, h) { gl.viewport(0, 0, w, h); },
+      draw: function (S) {
+        gl.uniform2f(U.u_res, cv.width, cv.height);
+        gl.uniform1f(U.u_time, S.time);
+        gl.uniform1f(U.u_flow, S.flow);
+        gl.uniform1f(U.u_audio, S.audio);
+        gl.uniform1f(U.u_bass, S.bass);
+        gl.uniform1f(U.u_mid, S.mid);
+        gl.uniform1f(U.u_treble, S.treble);
+        gl.uniform1f(U.u_solidity, S.solidity);
+        gl.uniform1f(U.u_light, S.light);
+        gl.uniform1f(U.u_zoom, S.zoom);
+        gl.uniform2f(U.u_tilt, S.tx, S.ty);
+        gl.uniform1f(U.u_eco, S.eco);
+        gl.uniform1f(U.u_ca, S.ca);
+        gl.uniform1f(U.u_scale, S.scale);
+        gl.uniformMatrix3fv(U.u_rot, false, S.mCol);
+        gl.drawArrays(gl.TRIANGLES, 0, 3);
+      }
+    };
+  }
+
+  // --- Renderer Canvas2D (fallback): mesma geometria, rotação, zoom e luz ---
+  function rgba(c, a) {
+    return 'rgba(' + Math.round(clamp01(c[0]) * 255) + ',' + Math.round(clamp01(c[1]) * 255) + ',' +
+           Math.round(clamp01(c[2]) * 255) + ',' + clamp01(a).toFixed(3) + ')';
+  }
+
+  function create2D(cv) {
+    var c = null;
+    try { c = cv.getContext('2d', { alpha: false }); } catch (e) { c = null; }
+    if (!c) return null;
+    var EDGE = [0.74, 0.85, 0.98];
+
+    function background(w, h, S) {
+      var half = h / 2, gi = 1 + 0.4 * S.light;
+      c.globalAlpha = 1;
+      c.fillStyle = '#0a0c10';
+      c.fillRect(0, 0, w, h);
+
+      var lg = c.createLinearGradient(0, 0, w, h);
+      lg.addColorStop(0, rgba(COL_A, 0.05 * gi));
+      lg.addColorStop(1, rgba(COL_B, 0.07 * gi));
+      c.fillStyle = lg;
+      c.fillRect(0, 0, w, h);
+
+      // halo: cresce com a luz; graves esquentam para magenta
+      var I = 0.7 * Math.pow(Math.max(S.light, 0.0001), 1.15);
+      if (I > 0.004) {
+        var hx = w / 2 + S.tx * 0.04 * half, hy = h / 2 - S.ty * 0.04 * half;
+        var r = half * (0.22 + 0.85 * S.light) * 1.5;
+        var hc = [mix(0.36, 0.88, clamp01(S.bass * 0.75)), mix(0.55, 0.30, clamp01(S.bass * 0.75)), mix(1.0, 0.8, clamp01(S.bass * 0.75))];
+        var rg = c.createRadialGradient(hx, hy, 0, hx, hy, r);
+        rg.addColorStop(0, rgba(hc, 0.6 * I));
+        rg.addColorStop(1, rgba(hc, 0));
+        c.fillStyle = rg;
+        c.fillRect(0, 0, w, h);
+      }
+
+      // faíscas nos agudos
+      if (S.treble > 0.05) {
+        var sd = Math.floor(S.flow * 3), n, sz = Math.max(1, h / 500);
+        c.fillStyle = rgba([0.7, 0.85, 1.0], 0.5 * S.treble);
+        for (n = 1; n <= 28; n++) {
+          c.fillRect(Math.abs(Math.sin(n * 91.7 + sd * 3.3) * 4e4 % 1) * w, Math.abs(Math.sin(n * 47.3 + sd * 7.1) * 2e4 % 1) * h, sz, sz);
+        }
+      }
+    }
+
+    return {
+      kind: '2d',
+      resize: function () {},
+      draw: function (S) {
+        var w = cv.width, h = cv.height, cx = w / 2, cy = h / 2, half = h / 2;
+        var u = Math.max(1, h / 600), i, j;
+        background(w, h, S);
+
+        // projeção: mundo = Mt·v·escala; tela = zoom·FOCAL·(x,y)/(z+D)
+        var m = S.mRow, k = S.zoom * FOCAL * half;
+        var px = [], py = [], dz = [];
+        for (i = 0; i < GEO.verts.length; i++) {
+          var v = GEO.verts[i];
+          var x = (m[0] * v[0] + m[3] * v[1] + m[6] * v[2]) * S.scale;
+          var y = (m[1] * v[0] + m[4] * v[1] + m[7] * v[2]) * S.scale;
+          var z = (m[2] * v[0] + m[5] * v[1] + m[8] * v[2]) * S.scale + CAM_D;
+          px.push(cx + k * x / z);
+          py.push(cy - k * y / z);
+          dz.push(z);
+        }
+
+        function drawEdges(far, alpha) {
+          c.lineCap = 'round';
+          for (j = 0; j < GEO.edges.length; j++) {
+            var e = GEO.edges[j], isFar = (dz[e[0]] + dz[e[1]]) / 2 > CAM_D;
+            if (isFar !== far) continue;
+            c.beginPath();
+            c.moveTo(px[e[0]], py[e[0]]);
+            c.lineTo(px[e[1]], py[e[1]]);
+            c.strokeStyle = rgba(EDGE, alpha * (0.1 + 0.25 * S.audio));   // brilho
+            c.lineWidth = (5 + 6 * S.audio) * u;
+            c.stroke();
+            var tb = S.treble * 0.6;   // agudos: arestas ficam mais brancas
+            c.strokeStyle = rgba([mix(EDGE[0], 1, tb), mix(EDGE[1], 1, tb), mix(EDGE[2], 1, tb)], alpha * 0.9);
+            c.lineWidth = 1.5 * u;
+            c.stroke();
+          }
+        }
+
+        drawEdges(true, 0.55);   // arestas do fundo, vistas através do sólido
+
+        if (!S.eco) {            // faces: alpha 0.02 (silêncio) até ~0.9 (som alto)
+          var alpha = 0.02 + 0.88 * S.solidity, order = [];
+          for (i = 0; i < GEO.faces.length; i++) {
+            var f = GEO.faces[i], zs = 0;
+            for (j = 0; j < 5; j++) zs += dz[f.idx[j]];
+            order.push({ f: f, z: zs / 5 });
+          }
+          order.sort(function (a, b) { return b.z - a.z; });   // de trás para frente
+          for (i = 0; i < order.length; i++) {
+            var face = order[i].f;
+            var nz = clamp01(0.5 + 0.5 * Math.sin(face.hash * 40 + S.time * 0.6) + (face.hash - 0.5) * 0.3 + S.mid * 0.25);
+            var col = [mix(COL_A[0], COL_B[0], nz), mix(COL_A[1], COL_B[1], nz), mix(COL_A[2], COL_B[2], nz)];
+            var mb = clamp(S.bass * 0.7, 0, 0.7);
+            col = [mix(col[0], COL_M[0], mb), mix(col[1], COL_M[1], mb), mix(col[2], COL_M[2], mb)];
+            var shade = 0.6 + 0.6 * S.solidity + 0.3 * S.light;
+            col = [col[0] * shade, col[1] * shade, col[2] * shade];
+            c.beginPath();
+            for (j = 0; j < 5; j++) {
+              var vi = face.idx[j];
+              if (j === 0) c.moveTo(px[vi], py[vi]); else c.lineTo(px[vi], py[vi]);
+            }
+            c.closePath();
+            c.fillStyle = rgba(col, order[i].z > CAM_D ? alpha * 0.55 : alpha);
+            c.fill();
+          }
+        }
+
+        drawEdges(false, 1.0);   // arestas da frente
+
+        // vértices: pontos que crescem com os agudos
+        var vr = (2.2 + 4.5 * S.treble) * u;
+        c.fillStyle = rgba([0.88, 0.94, 1.0], 0.8 + 0.2 * S.treble);
+        for (i = 0; i < px.length; i++) {
+          c.beginPath();
+          c.arc(px[i], py[i], vr, 0, TAU);
+          c.fill();
+        }
+
+        // vignette que cresce com o zoom
+        var zn = clamp((S.zoom - 0.5) / 2.5, 0, 1);
+        var vg = c.createRadialGradient(cx, cy, half * 0.5, cx, cy, Math.sqrt(cx * cx + cy * cy));
+        vg.addColorStop(0, 'rgba(0,0,0,0)');
+        vg.addColorStop(1, 'rgba(0,0,0,' + (0.10 + 0.30 * zn).toFixed(3) + ')');
+        c.fillStyle = vg;
+        c.fillRect(0, 0, w, h);
+      }
+    };
+  }
+
+  // --- Loop, pausa (visibilidade + IntersectionObserver) e qualidade adaptativa ---
+  var running = false, raf = 0, pageVisible = true, inView = true;
+  var lastDraw = 0, fpsN = 0, fpsT = 0, warm = 0, io = null;
+
+  function nowMs() { return (window.performance && performance.now) ? performance.now() : Date.now(); }
+
+  function frame(now) {
+    raf = 0;
+    if (!running) return;
+    raf = requestAnimationFrame(frame);
+    if (eco && now - lastDraw < 1000 / 30 - 3) return;       // modo econômico: 30 fps
+    var dt = Math.min(0.1, Math.max(0.001, (now - lastDraw) / 1000));
+    lastDraw = now;
+    var S = step(dt, now);
+    if (renderer) {
+      try { renderer.draw(S); } catch (e) { if (window.console) console.warn('[v1su4rt] draw:', e); }
+    }
+
+    // resolução adaptativa: abaixo de ~40 fps (25 no eco) reduz a escala interna
+    fpsN++;
+    if (now - fpsT >= 1200) {
+      var fps = fpsN * 1000 / (now - fpsT);
+      fpsN = 0; fpsT = now; warm++;
+      if (warm > 2 && fps < (eco ? 25 : 38) && quality > 0.5) {
+        quality = Math.max(0.5, quality * 0.85);
+        fitCanvas();
+      }
+    }
+  }
+
+  function updateRunning() {
+    var want = pageVisible && inView && !!renderer;
+    if (want === running) return;
+    running = want;
+    if (running) {
+      lastDraw = nowMs(); fpsT = lastDraw; fpsN = 0;
+      if (!raf) raf = requestAnimationFrame(frame);
+    } else if (raf) {
+      cancelAnimationFrame(raf);
+      raf = 0;
+    }
+  }
+
+  function observe() {
+    if (io) { io.disconnect(); io = null; }
+    if ('IntersectionObserver' in window && canvas) {
+      io = new IntersectionObserver(function (entries) {
+        inView = entries[entries.length - 1].isIntersecting;
+        updateRunning();
+      }, { threshold: 0 });
+      io.observe(canvas);
+    }
+  }
+
+  function switchTo2D() {
+    running = false;
+    if (raf) { cancelAnimationFrame(raf); raf = 0; }
+    canvas = replaceCanvas(canvas);
+    renderer = create2D(canvas);
+    fitCanvas();
+    observe();
+    updateRunning();
+  }
+
+  function init() {
+    canvas = document.getElementById('stage');
+    if (!canvas) return;
+    renderer = createGL(canvas);
+    if (!renderer) {
+      canvas = replaceCanvas(canvas);
+      renderer = create2D(canvas);
+    }
+    fitCanvas();
+    if ('ResizeObserver' in window) new ResizeObserver(fitCanvas).observe(document.documentElement);
+    window.addEventListener('resize', fitCanvas);
+    window.addEventListener('orientationchange', function () { setTimeout(fitCanvas, 150); });
+    document.addEventListener('visibilitychange', function () {
+      pageVisible = !document.hidden;
+      updateRunning();
+    });
+    pageVisible = !document.hidden;
+    observe();
+    updateRunning();
+  }
+
+  // --- API pública ---
+  window.v1su4rtShaders = {
+    setAudio: setAudio,
+    renderer: function () { return renderer ? renderer.kind : 'none'; },
+    _geometry: GEO,
+    _internals: { step: step, rotMatrix: rotMatrix, create2D: create2D, asciiOnly: asciiOnly, FRAG: FRAG, VERT: VERT }
+  };
+
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
+  else init();
+})();

@@ -1,0 +1,270 @@
+﻿// assets/shaders.js
+// Atualização: nova API window.v1su4rtShaders com WebGL1 + fallback Canvas2D,
+// helpers GLSL, ShaderStage, shaders para hero/preview/interaction, ecoMode e detecção de dispositivo fraco.
+(function(){
+  'use strict';
+
+  // utilitários JS
+  function compileShader(gl, type, src){
+    const s = gl.createShader(type);
+    gl.shaderSource(s, src);
+    gl.compileShader(s);
+    if(!gl.getShaderParameter(s, gl.COMPILE_STATUS)){
+      console.warn('[v1su4rt] shader compile failed', gl.getShaderInfoLog(s));
+      gl.deleteShader(s);
+      return null;
+    }
+    return s;
+  }
+
+  function linkProgram(gl, vsSrc, fsSrc){
+    const vs = compileShader(gl, gl.VERTEX_SHADER, vsSrc);
+    const fs = compileShader(gl, gl.FRAGMENT_SHADER, fsSrc);
+    if(!vs || !fs) return null;
+    const p = gl.createProgram();
+    gl.attachShader(p, vs); gl.attachShader(p, fs); gl.linkProgram(p);
+    if(!gl.getProgramParameter(p, gl.LINK_STATUS)){
+      console.warn('[v1su4rt] program link failed', gl.getProgramInfoLog(p));
+      return null;
+    }
+    return p;
+  }
+
+  const VERT_SRC = 'attribute vec2 a_pos; void main(){ gl_Position = vec4(a_pos, 0.0, 1.0); }';
+
+  // GLSL helpers (serão prefixados nos shaders)
+  const GLSL_HELPERS = `
+  float hash(vec2 p){ return fract(sin(dot(p, vec2(127.1,311.7))) * 43758.5453123); }
+  float noise(vec2 p){ vec2 i = floor(p); vec2 f = fract(p);
+    float a = hash(i); float b = hash(i + vec2(1.0,0.0)); float c = hash(i + vec2(0.0,1.0)); float d = hash(i + vec2(1.0,1.0));
+    vec2 u = f*f*(3.0-2.0*f);
+    return mix(a,b,u.x) + (c-a)*u.y*(1.0-u.x) + (d-b)*u.x*u.y;
+  }
+  float fbm(vec2 p, int OCT){ float v=0.0; float a=0.5; for(int i=0;i<6;i++){ if(i>=OCT) break; v += a * noise(p); p *= 2.0; a *= 0.5; } return v; }
+  vec2 rot(vec2 p, float a){ float c=cos(a), s=sin(a); return mat2(c,-s,s,c)*p; }
+  vec3 hsv2rgb(vec3 c){ vec3 rgb = clamp( abs(mod(c.x*6.0+vec3(0.0,4.0,2.0),6.0)-3.0)-1.0, 0.0, 1.0 ); return c.z * mix(vec3(1.0), rgb, c.y); }
+  `;
+
+  // ShaderStage encapsula WebGL render + uniforms e fallback 2D
+  class ShaderStage{
+    constructor(canvas, fragSrc, opts={}){
+      this.canvas = canvas;
+      this.fragSrc = fragSrc;
+      this.opts = opts;
+      this.gl = null; this.program = null; this.loc = {};
+      this.uniforms = {};
+      this.raf = null; this.running = false; this.startTime = 0; this.lastFrame = 0;
+      this.pixelRatio = 1; this.isWebgl = false; this.ctx2d = null;
+      this.init();
+    }
+
+    init(){
+      try{
+        const ctxOpts = { antialias:false, alpha:true, premultipliedAlpha:false, powerPreference:'high-performance' };
+        this.gl = this.canvas.getContext('webgl', ctxOpts) || this.canvas.getContext('experimental-webgl', ctxOpts);
+      }catch(e){ this.gl = null; }
+
+      if(!this.gl){
+        console.info('[v1su4rt] WebGL indisponível, usando Canvas2D fallback');
+        this.isWebgl = false; this.ctx2d = this.canvas.getContext('2d'); return;
+      }
+
+      this.isWebgl = true;
+      const fullSrc = GLSL_HELPERS + '\n' + this.fragSrc;
+      this.program = linkProgram(this.gl, VERT_SRC, fullSrc);
+      if(!this.program){ this.isWebgl = false; this.ctx2d = this.canvas.getContext('2d'); return; }
+
+      const gl = this.gl;
+      // buffer (fullscreen triangle)
+      const buf = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+      gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1,3,-1,-1,3]), gl.STATIC_DRAW);
+      const posLoc = gl.getAttribLocation(this.program, 'a_pos');
+      gl.enableVertexAttribArray(posLoc); gl.vertexAttribPointer(posLoc, 2, gl.FLOAT, false, 0, 0);
+
+      // capture uniform locations (silencioso se ausente)
+      const names = ['u_time','u_resolution','u_audio','u_bass','u_treble','u_tilt','u_zoom','u_size','u_eco','u_octaves','u_fragcount'];
+      for(const n of names){ try{ this.loc[n] = this.gl.getUniformLocation(this.program, n); }catch(e){ this.loc[n]=null; } }
+
+      this.updatePixelRatio(); this.resize();
+
+      document.addEventListener('visibilitychange', ()=>{ if(document.hidden) this.stop(); else this.start(); });
+      try{ const io = new IntersectionObserver(entries=>{ entries.forEach(e=>{ if(!e.isIntersecting) this.stop(); else if(!document.hidden) this.start(); }); }); io.observe(this.canvas);}catch(e){}
+
+      this.canvas.addEventListener('webglcontextlost', e=>{ e.preventDefault(); this.stop(); });
+      this.canvas.addEventListener('webglcontextrestored', ()=>{ this.start(); });
+    }
+
+    updatePixelRatio(){ const isMobile = /Mobi|Android/i.test(navigator.userAgent || ''); this.pixelRatio = Math.min(window.devicePixelRatio || 1, isMobile ? 1.5 : 2.0); }
+
+    resize(){ if(!this.canvas) return; this.updatePixelRatio(); const w = Math.max(1, Math.floor(this.canvas.clientWidth * this.pixelRatio)); const h = Math.max(1, Math.floor(this.canvas.clientHeight * this.pixelRatio)); if(this.canvas.width !== w || this.canvas.height !== h){ this.canvas.width = w; this.canvas.height = h; } if(this.isWebgl){ this.gl.viewport(0,0,this.canvas.width,this.canvas.height); } }
+
+    setUniform(name, value){ this.uniforms[name] = value; }
+
+    draw = (now)=>{
+      if(!this.startTime) this.startTime = now; const t = (now - this.startTime) * 0.001; const delta = now - (this.lastFrame || now); this.lastFrame = now;
+
+      if(this.isWebgl){ const gl = this.gl; gl.useProgram(this.program);
+        if(this.loc.u_time) gl.uniform1f(this.loc.u_time, t);
+        if(this.loc.u_resolution) gl.uniform2f(this.loc.u_resolution, this.canvas.width, this.canvas.height);
+        if(this.loc.u_audio && typeof this.uniforms.u_audio === 'number') gl.uniform1f(this.loc.u_audio, this.uniforms.u_audio);
+        if(this.loc.u_bass && typeof this.uniforms.u_bass === 'number') gl.uniform1f(this.loc.u_bass, this.uniforms.u_bass);
+        if(this.loc.u_treble && typeof this.uniforms.u_treble === 'number') gl.uniform1f(this.loc.u_treble, this.uniforms.u_treble);
+        if(this.loc.u_tilt && Array.isArray(this.uniforms.u_tilt)) gl.uniform2f(this.loc.u_tilt, this.uniforms.u_tilt[0], this.uniforms.u_tilt[1]);
+        if(this.loc.u_zoom && typeof this.uniforms.u_zoom === 'number') gl.uniform1f(this.loc.u_zoom, this.uniforms.u_zoom);
+        if(this.loc.u_size && typeof this.uniforms.u_size === 'number') gl.uniform1f(this.loc.u_size, this.uniforms.u_size);
+        if(this.loc.u_eco && typeof this.uniforms.u_eco === 'number') gl.uniform1f(this.loc.u_eco, this.uniforms.u_eco);
+        if(this.loc.u_octaves && typeof this.uniforms.u_octaves === 'number') gl.uniform1f(this.loc.u_octaves, this.uniforms.u_octaves);
+        if(this.loc.u_fragcount && typeof this.uniforms.u_fragcount === 'number') gl.uniform1f(this.loc.u_fragcount, this.uniforms.u_fragcount);
+        gl.drawArrays(gl.TRIANGLES, 0, 3);
+      } else {
+        // Canvas2D fallback: pulsating circle with gradient
+        const ctx = this.ctx2d; const w = this.canvas.width; const h = this.canvas.height; ctx.clearRect(0,0,w,h);
+        const audio = Math.max(0, this.uniforms.u_audio || 0);
+        const r = Math.min(w,h) * (0.15 + audio * 0.25 + 0.02 * Math.sin(t * 2.0));
+        ctx.save(); ctx.fillStyle = '#0a0c10'; ctx.fillRect(0,0,w,h);
+        const grad = ctx.createRadialGradient(w/2, h/2, r*0.1, w/2, h/2, r);
+        grad.addColorStop(0, 'rgba(91,140,255,' + (0.35+audio*0.5) + ')'); grad.addColorStop(1, 'rgba(163,123,255,0.0)');
+        ctx.fillStyle = grad; ctx.beginPath(); ctx.arc(w/2,h/2,r,0,Math.PI*2); ctx.fill(); ctx.restore();
+      }
+
+      this.raf = window.requestAnimationFrame(this.draw);
+    }
+
+    start(){ if(this.running) return; this.running = true; this.startTime = 0; this.lastFrame = 0; this.raf = window.requestAnimationFrame(this.draw); }
+    stop(){ if(!this.running) return; this.running = false; if(this.raf){ cancelAnimationFrame(this.raf); this.raf = null; } }
+  }
+
+  // Capabilities
+  const isWeakDevice = (navigator.hardwareConcurrency || 4) <= 4 || (navigator.deviceMemory || 4) <= 4;
+  let ecoMode = false; let octaves = isWeakDevice ? 3 : 5; let fragmentCount = isWeakDevice ? 12 : 24;
+
+  // Helper for length
+  function len(v){ return Math.sqrt(v[0]*v[0] + v[1]*v[1]); }
+
+  // Fragments (GLSL) - mantidos leves
+  const HERO_FS = `
+  precision mediump float;
+  uniform vec2 u_resolution; uniform float u_time; uniform float u_audio; uniform float u_bass; uniform float u_treble; uniform vec2 u_tilt; uniform float u_zoom;
+  ${GLSL_HELPERS}
+  void main(){
+    vec2 uv = gl_FragCoord.xy / u_resolution.xy;
+    vec2 p = (uv - 0.5) * vec2(u_resolution.x/u_resolution.y, 1.0);
+    float t = u_time;
+    int OCT = ${isWeakDevice ? 3 : 5};
+    float fbmVal = fbm(p * 0.6 + t * 0.06, OCT);
+    float zoom = mix(0.9, 1.4, sin(t * 0.125));
+    zoom += u_audio * 1.2; zoom += length(u_tilt) * 0.6; zoom = clamp(zoom, 0.5, 3.0);
+    vec3 baseA = vec3(0.357,0.549,1.0); vec3 baseB = vec3(0.639,0.482,1.0);
+    vec3 base = mix(baseA, baseB, fbmVal);
+    base += u_bass * vec3(0.15, 0.0, 0.05);
+    base += u_treble * vec3(0.0, 0.08, 0.12);
+    float lum = clamp(dot(base, vec3(0.2126,0.7152,0.0722)), 0.0, 0.85);
+    float d = length(p) * zoom; float vig = smoothstep(1.6, 0.6, d);
+    vec3 col = base * vig;
+    col = clamp(col, 0.0, vec3(lum));
+    gl_FragColor = vec4(col, 1.0);
+  }
+  `;
+
+  const PREVIEW_FS = `
+  precision mediump float;
+  uniform vec2 u_resolution; uniform float u_time; uniform float u_size; uniform float u_audio;
+  ${GLSL_HELPERS}
+  void main(){
+    vec2 uv = gl_FragCoord.xy / u_resolution.xy; vec2 p = uv - 0.5;
+    float t = u_time; float sizeMix = u_size;
+    float ref = sin((p.x * 10.0 + t * 4.0)) * 0.002 * (1.0 + u_audio * 1.2) * (1.0 + sizeMix * 0.8);
+    vec3 col = vec3(0.03,0.035,0.05) + vec3(u_audio * 0.02);
+    vec2 q = p + vec2(ref, ref * 0.5);
+    float vign = smoothstep(0.9, 0.4, length(p));
+    gl_FragColor = vec4(col * vign, 0.35);
+  }
+  `;
+
+  const INTERACTION_FS = `
+  precision mediump float;
+  uniform vec2 u_resolution; uniform float u_time; uniform float u_audio; uniform float u_bass; uniform float u_treble; uniform vec2 u_tilt; uniform float u_zoom; uniform float u_octaves; uniform float u_fragcount;
+  ${GLSL_HELPERS}
+  const float PI = 3.141592653589793;
+  vec3 palette(vec3 base, float bass, float tre){ base += bass * vec3(0.15,0.0,0.05); base += tre * vec3(0.0,0.08,0.12); return base; }
+  void main(){
+    vec2 uv = gl_FragCoord.xy / u_resolution.xy; vec2 p = uv - 0.5; p.x *= u_resolution.x / u_resolution.y;
+    float t = u_time; float audio = clamp(u_audio,0.0,1.0); float bass = clamp(u_bass,0.0,1.0); float tre = clamp(u_treble,0.0,1.0);
+    float ang = atan(p.y, p.x); float rad = length(p);
+    float N = max(1.0, floor(u_fragcount));
+    float sector = floor((ang + PI) / (2.0 * PI) * N);
+    float rnd = hash(vec2(sector, 1.0));
+    float offsetRad = audio * bass * (0.15 + rnd * 0.35);
+    float offsetAng = (rnd - 0.5) * audio * 0.8;
+    float rot = (rnd - 0.5) * audio * 1.5;
+    float aCenter = (sector + 0.5) / N * 2.0 * PI - PI;
+    float localAng = ang - aCenter;
+    float fragMix = smoothstep(0.02, 0.04, audio);
+    float radial = rad + mix(0.0, offsetRad, fragMix);
+    float angled = localAng + offsetAng;
+    vec3 base = vec3(0.357,0.549,1.0); base = palette(base, bass, tre);
+    int OCT = int(max(1.0, u_octaves));
+    float f = fbm((p * (1.5 + bass * 2.0)) + vec2( cos(t*0.05), sin(t*0.05) ), OCT);
+    float filaments = step(0.02, abs(noise(p * 8.0) - 0.5)) * u_treble;
+    vec3 col = base + vec3(f * audio * 0.6) + vec3(filaments * 0.6);
+    float angDist = abs(angled);
+    float arc = smoothstep((2.0*PI)/N * 0.5, (2.0*PI)/N * 0.1, angDist);
+    float ring = smoothstep(0.02 + offsetRad*0.5, 0.01, abs(radial - 0.35));
+    float glow = pow(max(0.0, 1.0 - length(p) * 2.0), 2.0) * (0.3 + audio * 0.7);
+    float outMix = arc * ring;
+    vec3 final = col * outMix + vec3(glow);
+    float z = clamp((audio * u_zoom) * 0.002, 0.0, 0.02);
+    vec2 off = vec2(z, 0.0);
+    float sampleR = fbm((p+off)*3.0 + t*0.02, OCT);
+    float sampleB = fbm((p-off)*3.0 + t*0.02, OCT);
+    final.r = mix(final.r, sampleR, 0.08 * audio * u_zoom);
+    final.b = mix(final.b, sampleB, 0.08 * audio * u_zoom);
+    final = clamp(final, 0.0, 0.85);
+    gl_FragColor = vec4(final, 1.0 - smoothstep(0.9, 1.5, length(p)));
+  }
+  `;
+
+  // Instances and shared state
+  const Stages = { hero:null, preview:null, interaction:null };
+  const state = { audio:0, bass:0, treble:0, tiltX:0, tiltY:0, size:0, eco:false };
+
+  function ensureCanvas(id){ let c = document.getElementById(id); if(!c){ c = document.createElement('canvas'); c.id = id; c.style.position='absolute'; c.style.inset='0'; c.style.width='100%'; c.style.height='100%'; const container = document.querySelector('.hero-art') || document.body; container.insertBefore(c, container.firstChild); } return c; }
+
+  function applyStateTo(stage){ if(!stage) return; stage.setUniform('u_audio', state.audio); stage.setUniform('u_bass', state.bass); stage.setUniform('u_treble', state.treble); stage.setUniform('u_tilt', [state.tiltX, state.tiltY]); stage.setUniform('u_size', state.size); stage.setUniform('u_eco', state.eco?1:0); stage.setUniform('u_octaves', ecoMode?3:octaves); stage.setUniform('u_fragcount', ecoMode?8:fragmentCount); const zoomVal = Math.max(0.5, Math.min(3.0, 1.0 + state.audio * 1.2 + Math.sqrt(state.tiltX*state.tiltX + state.tiltY*state.tiltY) * 0.6)); stage.setUniform('u_zoom', zoomVal); }
+
+  // FPS monitor to enable ecoMode
+  let fpsProxy = []; function monitorFPS(sample){ fpsProxy.push(sample); if(fpsProxy.length>120) fpsProxy.shift(); }
+  setInterval(()=>{ if(fpsProxy.length===0) return; const avg = fpsProxy.reduce((a,b)=>a+b,0)/fpsProxy.length; fpsProxy = []; if(avg < 40 && !ecoMode){ ecoMode = true; console.info('[v1su4rt] ecoMode ativado automaticamente (FPS médio', Math.round(avg),')'); v1su4rtAPI.setEco(true); } }, 2000);
+
+  // start/stop helpers
+  function startAll(){ Object.values(Stages).forEach(s=>{ if(s && !s.running) s.start(); }); }
+  function stopAll(){ Object.values(Stages).forEach(s=>{ if(s && s.running) s.stop(); }); }
+
+  // API
+  const v1su4rtAPI = {
+    init(){
+      const heroC = ensureCanvas('hero-shader'); const prevC = ensureCanvas('preview-canvas'); const intC = ensureCanvas('interaction-canvas');
+      heroC.style.zIndex='0'; prevC.style.zIndex='1'; intC.style.zIndex='2'; heroC.style.pointerEvents='none'; prevC.style.pointerEvents='none'; intC.style.pointerEvents='none';
+      Stages.hero = new ShaderStage(heroC, HERO_FS); Stages.preview = new ShaderStage(prevC, PREVIEW_FS); Stages.interaction = new ShaderStage(intC, INTERACTION_FS);
+      // initial uniforms
+      this.setAudio({ audio:0, bass:0, treble:0, tiltX:0, tiltY:0 }); this.setSize(0);
+      // hook simple FPS sampling from stages (each stage records delta via lastFrame)
+      // start loops
+      startAll();
+      return this;
+    },
+    setAudio(o){ state.audio = Math.max(0, Math.min(1, o.audio || 0)); state.bass = Math.max(0, Math.min(1, o.bass || 0)); state.treble = Math.max(0, Math.min(1, o.treble || 0)); state.tiltX = Math.max(-1, Math.min(1, o.tiltX || 0)); state.tiltY = Math.max(-1, Math.min(1, o.tiltY || 0)); applyStateTo(Stages.hero); applyStateTo(Stages.preview); applyStateTo(Stages.interaction); },
+    setSize(i){ state.size = i; if(Stages.preview) Stages.preview.setUniform('u_size', i); },
+    setEco(v){ ecoMode = !!v; state.eco = ecoMode; octaves = ecoMode ? 3 : (isWeakDevice?3:5); fragmentCount = ecoMode ? 8 : (isWeakDevice?12:24); if(Stages.hero) Stages.hero.setUniform('u_octaves', octaves); if(Stages.interaction) Stages.interaction.setUniform('u_fragcount', fragmentCount); },
+    stopAll(){ stopAll(); }
+  };
+
+  window.v1su4rtShaders = v1su4rtAPI; // principal
+  // manter compatibilidade com código anterior que referenciava ESFShaders
+  window.ESFShaders = v1su4rtAPI;
+
+  if(document.readyState === 'complete' || document.readyState === 'interactive'){
+    try{ v1su4rtAPI.init(); }catch(e){ console.warn('[v1su4rt] init falhou', e); }
+  } else { window.addEventListener('DOMContentLoaded', ()=>{ try{ v1su4rtAPI.init(); }catch(e){ console.warn('[v1su4rt] init falhou', e); } }); }
+
+})();

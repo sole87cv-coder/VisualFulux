@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <meta name="theme-color" content="#07090d">
+    <meta name="mobile-web-app-capable" content="yes">
+    <meta name="description" content="VISUAL_FUMAÇA_FOLHA_00: shaders visuais que reagem ao microfone e ao giroscópio.">
+    <title>VISUAL_FUMAÇA_FOLHA_00</title>
+    <link rel="icon" href="./icon.svg" type="image/svg+xml">
+    <link rel="apple-touch-icon" href="./icons/icon-192.png">
+    <link rel="manifest" href="./manifest.webmanifest">
+    <link rel="stylesheet" href="./assets/styles.css">
+    <script src="./assets/shaders.js" defer></script>
+    <script src="./assets/interaction.js" defer></script>
+    <script src="./assets/app.js" defer></script>
+</head>
+<body>
+    <canvas id="stage" aria-hidden="true"></canvas>
+
+    <section class="panel" id="panel" aria-label="Controles das interações">
+        <div class="panel-head">
+            <button class="button" id="interaction-toggle" type="button" aria-pressed="false">Ativar interações</button>
+            <button class="icon-btn" id="panel-collapse" type="button" aria-expanded="true" aria-controls="panel-body" aria-label="Recolher controles"><span class="chev" aria-hidden="true"></span></button>
+            <button class="icon-btn" id="panel-focus" type="button" aria-label="Modo imersivo"><span class="dot" aria-hidden="true"></span></button>
+        </div>
+        <div class="panel-body" id="panel-body">
+            <p class="hook" id="hook">
+                <strong>Faça barulho.</strong>
+                <span>Ela responde.</span>
+            </p>
+            <p class="status" id="interaction-status" role="status" aria-live="polite"></p>
+
+            <div class="controls">
+                <div class="control">
+                    <label for="audio-sens">Sensibilidade áudio</label>
+                    <output id="audio-sens-value" for="audio-sens">1.50</output>
+                    <input id="audio-sens" type="range" min="0" max="3" step="0.05" value="1.5">
+                </div>
+                <div class="control">
+                    <label for="orient-sens">Sensibilidade giroscópio</label>
+                    <output id="orient-sens-value" for="orient-sens">1.50</output>
+                    <input id="orient-sens" type="range" min="0" max="3" step="0.05" value="1.5">
+                </div>
+                <div class="control">
+                    <label for="morph">Fumaça ↔ Folha</label>
+                    <output id="morph-value" for="morph">0.35</output>
+                    <input id="morph" type="range" min="0" max="1" step="0.01" value="0.35">
+                </div>
+                <div class="control">
+                    <label for="speed">Velocidade</label>
+                    <output id="speed-value" for="speed">1.00</output>
+                    <input id="speed" type="range" min="0.05" max="3" step="0.05" value="1.0">
+                </div>
+
+                <div class="seg" role="group" aria-label="Modo de cor">
+                    <button type="button" data-color-mode="auto" aria-pressed="true">Auto</button>
+                    <button type="button" data-color-mode="bw" aria-pressed="false">P&amp;B</button>
+                    <button type="button" data-color-mode="color" aria-pressed="false">Cor</button>
+                </div>
+
+                <label class="toggle">
+                    <input id="chromatic" type="checkbox" checked>
+                    <span>Chromatic aberration</span>
+                </label>
+            </div>
+
+            <a class="privacy" href="./privacy.html">Privacidade</a>
+        </div>
+    </section>
+
+    <button class="restore-btn" id="panel-restore" type="button" aria-label="Mostrar painel" hidden>
+        <span aria-hidden="true">◉</span>
+    </button>
+
+    <noscript><p class="noscript">Este site precisa de JavaScript para desenhar os visuais.</p></noscript>
+</body>
+</html>
