@@ -94,8 +94,9 @@ void main() {
 }
 `;
 
-  function fragScene(oct) {
+  function fragScene(oct, useDerivatives) {
     return `
+${useDerivatives ? '#extension GL_OES_standard_derivatives : enable' : ''}
 #ifdef GL_FRAGMENT_PRECISION_HIGH
 precision highp float;
 #else
@@ -119,6 +120,10 @@ uniform float u_growth;
 uniform float u_rippleAge;
 uniform float u_pitch;
 uniform float u_pitchStr;
+
+float veinLineWidth(float distanceToLine, float fallbackWidth) {
+${useDerivatives ? '  return max(fwidth(distanceToLine) * 1.15, 0.0015);' : '  return fallbackWidth;'}
+}
 
 float hash21(vec2 p) {
   p = fract(p * vec2(123.34, 456.21));
@@ -281,14 +286,16 @@ void main() {
   float veinCoord = lp.y - pow(abs(lp.x), 0.70) * (0.70 + 0.25 * leafT);
   float veinPhase = veinCoord * 8.0;
   float veinD = abs(fract(veinPhase + 0.5) - 0.5);
-  float lateralVein = 1.0 - smoothstep(0.0, 0.050, veinD);
+  float lateralWidth = veinLineWidth(veinD, 0.050);
+  float lateralVein = 1.0 - smoothstep(0.0, lateralWidth, veinD);
   lateralVein *= smoothstep(0.03, 0.14, abs(lp.x));
   lateralVein *= inside * growMask;
 
   // NERVURAS TERCIÁRIAS
   float veinPhase2 = veinCoord * 16.0 + u_mid * 0.35;
   float veinD2 = abs(fract(veinPhase2 + 0.5) - 0.5);
-  float tertiaryVein = 1.0 - smoothstep(0.0, 0.030, veinD2);
+  float tertiaryWidth = veinLineWidth(veinD2, 0.030);
+  float tertiaryVein = 1.0 - smoothstep(0.0, tertiaryWidth, veinD2);
   tertiaryVein *= smoothstep(0.06, 0.22, abs(lp.x));
   tertiaryVein *= inside * growMask;
 
@@ -573,7 +580,8 @@ void main() {
 
     const vs = compile(gl.VERTEX_SHADER, VERT_FULL, 'vs');
     const shaderOctaves = compactScreen ? (ecoMode ? 3 : 4) : (ecoMode ? 4 : 6);
-    const fsScene = compile(gl.FRAGMENT_SHADER, fragScene(shaderOctaves), 'fsScene');
+    const useDerivatives = !!gl.getExtension('OES_standard_derivatives');
+    const fsScene = compile(gl.FRAGMENT_SHADER, fragScene(shaderOctaves, useDerivatives), 'fsScene');
     const fsPost = compile(gl.FRAGMENT_SHADER, FRAG_POST, 'fsPost');
     if (!vs || !fsScene || !fsPost) return false;
 
@@ -614,7 +622,7 @@ void main() {
     const w = window.innerWidth;
     const h = window.innerHeight;
     const device = w < 640 ? 'mobile' : w < 1024 ? 'tablet' : 'desktop';
-    const maxDpr = { mobile: 1.0, tablet: 1.25, desktop: 1.5 }[device];
+    const maxDpr = { mobile: 1.25, tablet: 1.25, desktop: 1.5 }[device];
     const dpr = Math.min(window.devicePixelRatio || 1, maxDpr) * renderScale;
     const cw = Math.max(2, Math.round(w * dpr));
     const ch = Math.max(2, Math.round(h * dpr));
