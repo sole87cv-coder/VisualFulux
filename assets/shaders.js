@@ -42,8 +42,8 @@
   // Qualidade adaptativa: mantém os efeitos, reduz os pixels processados em celulares.
   const compactScreen = Math.min(window.innerWidth, window.innerHeight) < 760;
   const minRenderScale = ecoMode ? 0.18 : (compactScreen ? 0.22 : 0.40);
-  const maxRenderScale = ecoMode ? 0.60 : (compactScreen ? 0.72 : 0.80);
-  let renderScale = ecoMode ? 0.40 : (compactScreen ? 0.52 : 0.80);
+  const maxRenderScale = ecoMode ? 0.78 : (compactScreen ? 0.98 : 0.80);
+  let renderScale = ecoMode ? 0.54 : (compactScreen ? 0.72 : 0.80);
   let perfWindowStart = 0;
   let perfDeltaSum = 0;
   let perfDeltaCount = 0;
@@ -56,7 +56,7 @@
       perfDeltaCount++;
     }
     if (!perfWindowStart) perfWindowStart = timestamp;
-    if (timestamp - perfWindowStart < 1500) return;
+    if (timestamp - perfWindowStart < 1000) return;
 
     const avgFrameMs = perfDeltaCount ? (perfDeltaSum / perfDeltaCount) * 1000 : 0;
     const targetFrameMs = compactScreen
