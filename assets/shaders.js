@@ -39,6 +39,37 @@
   }
   let ecoMode = detectEco();
 
+  // Qualidade adaptativa: mantém os efeitos, reduz os pixels processados em celulares.
+  const compactScreen = Math.min(window.innerWidth, window.innerHeight) < 760;
+  const minRenderScale = ecoMode ? 0.40 : 0.55;
+  const maxRenderScale = ecoMode ? 0.68 : (compactScreen ? 0.82 : 1.0);
+  let renderScale = ecoMode ? 0.62 : (compactScreen ? 0.82 : 1.0);
+  let perfWindowStart = 0;
+  let perfDeltaSum = 0;
+  let perfDeltaCount = 0;
+  let renderAccumulator = 0;
+  let lastRenderedAt = 0;
+
+  function adaptRenderScale(timestamp, dt) {
+    if (dt >= 0.004 && dt <= 0.10) {
+      perfDeltaSum += dt;
+      perfDeltaCount++;
+    }
+    if (!perfWindowStart) perfWindowStart = timestamp;
+    if (timestamp - perfWindowStart < 2500) return;
+
+    const avgFrameMs = perfDeltaCount ? (perfDeltaSum / perfDeltaCount) * 1000 : 0;
+    const targetFrameMs = ecoMode ? (1000 / 30) : (1000 / 60);
+    if (avgFrameMs > targetFrameMs + 8) {
+      renderScale = Math.max(minRenderScale, renderScale * 0.86);
+    } else if (avgFrameMs > 0 && avgFrameMs < targetFrameMs + 2) {
+      renderScale = Math.min(maxRenderScale, renderScale + 0.025);
+    }
+    perfWindowStart = timestamp;
+    perfDeltaSum = 0;
+    perfDeltaCount = 0;
+  }
+
   let running = true;
   let observerInView = true;
   function updateRunning() { running = !document.hidden && observerInView; }
@@ -579,8 +610,8 @@ void main() {
     const w = window.innerWidth;
     const h = window.innerHeight;
     const device = w < 640 ? 'mobile' : w < 1024 ? 'tablet' : 'desktop';
-    const maxDpr = { mobile: 1.5, tablet: 1.75, desktop: 2 }[device];
-    const dpr = Math.min(window.devicePixelRatio || 1, maxDpr) * (ecoMode ? 0.75 : 1);
+    const maxDpr = { mobile: 1.25, tablet: 1.5, desktop: 1.75 }[device];
+    const dpr = Math.min(window.devicePixelRatio || 1, maxDpr) * renderScale;
     const cw = Math.max(2, Math.round(w * dpr));
     const ch = Math.max(2, Math.round(h * dpr));
     if (canvas.width !== cw || canvas.height !== ch) {
@@ -703,6 +734,16 @@ void main() {
 
     updateGrowth(dt);
 
+    // Mantém a animação em 30 fps nos aparelhos econômicos, sem pausar o áudio.
+    if (ecoMode) {
+      renderAccumulator += dt;
+      if (renderAccumulator < 1.0 / 30.0) return;
+      renderAccumulator %= 1.0 / 30.0;
+    }
+    const renderedDelta = lastRenderedAt ? (t - lastRenderedAt) / 1000 : dt;
+    lastRenderedAt = t;
+    adaptRenderScale(t, renderedDelta);
+
     resizeGL();
     state.colorAmountResolved = resolveColorAmount();
 
@@ -753,6 +794,11 @@ void main() {
   lastTime = performance.now();
   frameId = requestAnimationFrame(frame);
 })();
+
+
+
+
+
 
 
 
