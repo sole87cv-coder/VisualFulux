@@ -42,8 +42,8 @@
   // Qualidade adaptativa: mantém os efeitos, reduz os pixels processados em celulares.
   const compactScreen = Math.min(window.innerWidth, window.innerHeight) < 760;
   const minRenderScale = ecoMode ? 0.18 : (compactScreen ? 0.22 : 0.40);
-  const maxRenderScale = ecoMode ? 0.40 : (compactScreen ? 0.48 : 0.80);
-  let renderScale = ecoMode ? 0.34 : (compactScreen ? 0.42 : 0.80);
+  const maxRenderScale = ecoMode ? 0.60 : (compactScreen ? 0.72 : 0.80);
+  let renderScale = ecoMode ? 0.40 : (compactScreen ? 0.52 : 0.80);
   let perfWindowStart = 0;
   let perfDeltaSum = 0;
   let perfDeltaCount = 0;
@@ -56,16 +56,16 @@
       perfDeltaCount++;
     }
     if (!perfWindowStart) perfWindowStart = timestamp;
-    if (timestamp - perfWindowStart < 2500) return;
+    if (timestamp - perfWindowStart < 1500) return;
 
     const avgFrameMs = perfDeltaCount ? (perfDeltaSum / perfDeltaCount) * 1000 : 0;
     const targetFrameMs = compactScreen
       ? (ecoMode && renderScale <= 0.27 ? (1000 / 24) : (1000 / 30))
       : (1000 / 60);
-    if (avgFrameMs > targetFrameMs + 8) {
-      renderScale = Math.max(minRenderScale, renderScale * 0.86);
-    } else if (avgFrameMs > 0 && avgFrameMs < targetFrameMs - 3) {
-      renderScale = Math.min(maxRenderScale, renderScale + 0.025);
+    if (avgFrameMs > targetFrameMs + 5) {
+      renderScale = Math.max(minRenderScale, renderScale * 0.88);
+    } else if (avgFrameMs > 0 && avgFrameMs < targetFrameMs + 1.5) {
+      renderScale = Math.min(maxRenderScale, renderScale + 0.018);
     }
     perfWindowStart = timestamp;
     perfDeltaSum = 0;
@@ -614,7 +614,7 @@ void main() {
     const w = window.innerWidth;
     const h = window.innerHeight;
     const device = w < 640 ? 'mobile' : w < 1024 ? 'tablet' : 'desktop';
-    const maxDpr = { mobile: 0.95, tablet: 1.25, desktop: 1.5 }[device];
+    const maxDpr = { mobile: 1.0, tablet: 1.25, desktop: 1.5 }[device];
     const dpr = Math.min(window.devicePixelRatio || 1, maxDpr) * renderScale;
     const cw = Math.max(2, Math.round(w * dpr));
     const ch = Math.max(2, Math.round(h * dpr));
